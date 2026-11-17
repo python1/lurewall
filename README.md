@@ -37,10 +37,11 @@ combines them behind one gate and reports what a lab test shows.
 
 Built so far: the project scaffold, the signed event log, the access-log
 reader, the canaries with their throwaway lab site, the attack and behavior
-signals, the decision engine, the nftables adapter, the sweeper and the
-service command. Everything runs in dry-run by default. The adapter is tested
-against a real `nft` in CI, but no block has been checked on a live host yet,
-and the systemd units are untested reference files.
+signals, the decision engine, the nftables adapter, the sweeper, the
+service command, and the lab harness with its runbook. Everything runs in
+dry-run by default. The adapter is tested against a real `nft` in CI,
+including Debian 13's own packages, but no block has been checked on a live
+host yet. The systemd units are reference files, untested on real systemd.
 
 ## The signed log
 
@@ -299,6 +300,30 @@ address and probes sent from another are not blocked. A stale canary hit (from
 a backlog) is logged but not counted. Cross-site probes never count, so a
 client that forges a Referer hides its probes; the engine logs that it saw
 them (`content_reader_cross_site_probes_not_counted`).
+
+## The lab harness
+
+The lab runbook is [docs/lab-runbook.md](docs/lab-runbook.md). It covers
+install in CT 110, the twenty test cases and the results export.
+
+```sh
+lurewall lab list                                   # the twenty cases
+lurewall lab case 3 --from alienware                # run one, record it in the ledger
+lurewall checkpoint pull --pubkey KEY --repo DIR    # Mac job: fetch, check, commit
+lurewall lab results --log LOG --pubkey KEY --anchors DIR --ledger L --out OUT
+lurewall lab tamper --log COPY --pubkey KEY --anchors DIR --work DIR   # case 6
+```
+
+- **Requests.** The harness sends plain GET and HEAD requests. It sends them
+  only to a private or loopback address over HTTP and refuses anything else.
+- **Ledger.** Each run is written to a ledger on the client with its source
+  address and time window. The signed log holds no request text, so the
+  ledger is what ties events to a case.
+- **Results.** `lab results` verifies the log first and exports nothing from
+  a log that fails. It escapes every string it writes.
+- **Case 20.** Warden (Grok Bot) runs from the Mac in Ask every time mode. It
+  is dry-run only, and the export fails the run unless the log shows dry-run
+  for the whole of it.
 
 ## Development
 

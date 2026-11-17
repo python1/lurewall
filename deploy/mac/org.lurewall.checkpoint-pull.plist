@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Lurewall lab: pull the signed checkpoint from CT 110 every five minutes.
+
+  Install (runbook, Phase 4): replace YOU with your macOS user name and
+  PUBKEY with the lab's public key (64 hex characters, from `lurewall pubkey`),
+  copy to ~/Library/LaunchAgents/, then:
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.lurewall.checkpoint-pull.plist
+
+  It commits to a local repository only. Pushing and OpenTimestamps stamping
+  are options of the pull command (see the runbook); add them once
+  python1/lurewall-checkpoints and the OpenTimestamps client are set up.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.lurewall.checkpoint-pull</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/python1/lurewall/.venv/bin/lurewall</string>
+        <string>checkpoint</string>
+        <string>pull</string>
+        <string>--url</string>
+        <string>http://192.168.1.160/lurewall-checkpoint.json</string>
+        <string>--pubkey</string>
+        <string>PUBKEY</string>
+        <string>--repo</string>
+        <string>/Users/YOU/lurewall-lab/checkpoints-repo</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/YOU/lurewall-lab/checkpoint-pull.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOU/lurewall-lab/checkpoint-pull.log</string>
+</dict>
+</plist>

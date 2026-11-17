@@ -349,7 +349,8 @@ def exact_locations(conf: str) -> list[str]:
 def test_only_table_paths_get_a_decoy_location(built):
     canary_set, result = built
     conf = result.nginx_conf.read_text()
-    decoy_locations = [path for path in exact_locations(conf) if path != "/developers/api.html"]
+    not_decoys = {"/developers/api.html", labsite.FETCH_CHECK_PAGE, labsite.CHECKPOINT_ROUTE}
+    decoy_locations = [path for path in exact_locations(conf) if path not in not_decoys]
     assert decoy_locations == [c.path for c in canary_set.canaries]
     # No prefix or regex location could answer a path outside the table.
     assert re.findall(r"^\s*location (\S+) \{", conf, re.M) == [
@@ -594,3 +595,51 @@ def test_cli_build_failure_on_collision_is_exit_1(tmp_path, capsys):
     code, _out, err = run(capsys, "lab-site", "build", "--state", state, "--out", tmp_path / "site")
     assert code == 1 and "BUILD FAILED" in err and "collides with /assets/site.css" in err
     assert not (tmp_path / "site").exists()
+
+
+# -- PR 8: the fetch-check page and the served checkpoint ------------------------------------
+
+
+def test_the_fetch_check_page_holds_its_markers_and_no_canary():
+    canary_set = make()
+    page = labsite.render_files(canary_set)[labsite.FETCH_CHECK_PAGE]
+    assert f"<!-- {labsite.MARKER_COMMENT} -->" in page
+    assert f'aria-hidden="true">{labsite.MARKER_HIDDEN}<' in page
+    assert canary_set.placeholder not in page
+    for canary in canary_set.canaries:
+        assert canary.path not in page
+    files = labsite.render_files(canary_set)
+    assert not any(labsite.FETCH_CHECK_PAGE in body for body in files.values())  # unlinked
+
+
+def test_the_fetch_check_page_sends_the_marker_header_and_not_the_canary_header():
+    canary_set = make()
+    conf = labsite.nginx_config(canary_set, "/srv/lab")
+    block = conf.split(f"location = {labsite.FETCH_CHECK_PAGE} {{", 1)[1].split("}", 1)[0]
+    assert f'add_header {labsite.MARKER_HEADER_NAME} "{labsite.MARKER_HEADER}" always;' in block
+    assert canary_set.header_name not in block
+
+
+def test_the_checkpoint_is_served_only_when_asked_for():
+    canary_set = make()
+    assert labsite.CHECKPOINT_ROUTE not in labsite.nginx_config(canary_set, "/srv/lab")
+    conf = labsite.nginx_config(
+        canary_set, "/srv/lab", checkpoint_file="/srv/lurewall/checkpoint/checkpoint.json"
+    )
+    block = conf.split(f"location = {labsite.CHECKPOINT_ROUTE} {{", 1)[1].split("    }\n", 1)[0]
+    assert "alias /srv/lurewall/checkpoint/checkpoint.json;" in block
+    assert "default_type application/json;" in block
+
+
+@pytest.mark.parametrize(
+    "path", ["relative/checkpoint.json", "/srv/../etc/shadow", "/srv/a b", "/srv/x;deny all", ""]
+)
+def test_a_bad_checkpoint_path_is_refused(path):
+    with pytest.raises(labsite.BuildError):
+        labsite.nginx_config(make(), "/srv/lab", checkpoint_file=path)
+
+
+def test_no_canary_can_land_on_the_new_routes():
+    routes = labsite.site_routes()
+    for route in (labsite.FETCH_CHECK_PAGE, labsite.CHECKPOINT_ROUTE, "/lab/"):
+        assert route in routes
