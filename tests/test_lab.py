@@ -23,7 +23,7 @@ from lurewall.labclient import Response, Target
 REPO = Path(__file__).resolve().parents[1]
 T0 = 1_800_000_000_000
 LAB = Target("192.168.1.160", 80)
-REF = "/staging/verify-local/service-2490?v=" + "ab" * 16
+REF = "/fixture/not-a-canary/page-0001?v=" + "ab" * 16
 PAGE = (
     b"<html><head><!-- read " + REF.encode() + b" first --></head><body>"
     b'<a href="/about.html">About</a> <a href="http://192.168.1.160/docs/">Docs</a>'
@@ -195,7 +195,7 @@ def test_case_8_page_uses_an_id_no_one_was_served():
     srcs = re.findall(r'src="([^"]+)"', page)
     assert srcs[1:] == ["http://192.168.1.160/.env", "http://192.168.1.160/.git/config"]
     canary = srcs[0]
-    assert canary.startswith("http://192.168.1.160/staging/verify-local/service-2490?v=")
+    assert canary.startswith("http://192.168.1.160/fixture/not-a-canary/page-0001?v=")
     assert canary.split("=")[1] != "ab" * 16
 
 
@@ -355,7 +355,7 @@ def test_rolled_up_hits_count_and_count_as_counted(tmp_path, key):
 
 def test_case_verdicts(tmp_path, key):
     def one(case, events, **extra):
-        directory = tmp_path / f"c{case}-{len(events)}-{len(extra)}"
+        directory = tmp_path / f"run{len(list(tmp_path.iterdir()))}"
         return evaluate(directory, key, events, [run(case, T0, T0 + 5_000, **extra)])[0]
 
     hit = (T0 + 1_000, "canary_hit", MAC, {"counted": True, "placement": "p", "lure": "bait"})
@@ -366,7 +366,11 @@ def test_case_verdicts(tmp_path, key):
     assert one(3, [sig, hit]).verdict == results.FAIL
     assert one(4, []).verdict == results.PASS
     assert one(4, [sig]).verdict == results.FAIL
-    assert one(7, [(T0 + 1_000, "decision", MAC, {"outcome": "allowlisted"})]).verdict == "pass"
+    allow = (T0 + 1_000, "would_block", MAC, {"reason": "allowlisted"})
+    assert one(7, [allow]).verdict == results.PASS
+    assert one(7, [allow, (T0 + 2_000, "block", MAC, {})]).verdict == results.FAIL
+    dry = (T0 + 1_000, "would_block", MAC, {"reason": "dry_run"})
+    assert one(7, [dry]).verdict == results.FAIL  # dry-run is not the allowlist at work
     assert one(9, [hit]).verdict == results.PASS
     relayed = (T0 + 1_000, "canary_relayed", MAC, {})
     assert one(10, [relayed], part="hit").verdict == results.PASS
@@ -635,14 +639,18 @@ def test_the_checkpoint_command_refuses_a_public_url(tmp_path, key, capsys):
 # -- deploy files ------------------------------------------------------------------------
 
 
-def test_logrotate_rotates_the_access_log_by_size():
-    text = (REPO / "deploy" / "logrotate" / "lurewall-nginx").read_text()
-    assert "/var/log/nginx/lurewall.json.log" in text
-    assert re.search(r"^\s*maxsize\s+\d+M$", text, re.M)
-    directives = [line.strip() for line in text.splitlines() if not line.lstrip().startswith("#")]
-    assert "copytruncate" not in directives  # the reader follows a renamed file
+def test_logrotate_rotates_the_access_log_by_size_and_often():
     timer = (REPO / "deploy" / "logrotate" / "logrotate.timer.d-lurewall.conf").read_text()
-    assert "OnCalendar=*:0/15" in timer
+    assert "OnCalendar=\nOnCalendar=*:0/15" in timer
+    runbook = (REPO / "docs" / "lab-runbook.md").read_text()
+    assert "maxsize 100M" in runbook and "/etc/logrotate.d/nginx" in runbook
+
+
+def test_the_runbook_keeps_case_20_and_the_mac_in_dry_run():
+    runbook = (REPO / "docs" / "lab-runbook.md").read_text()
+    dry, enforcing = runbook.split("### 6B", 1)
+    assert "lurewall lab case 20 --from mac" in dry
+    assert "--from mac" not in enforcing.split("## Phase 7", 1)[0]
 
 
 def test_the_mac_job_runs_the_pull_command_every_five_minutes():

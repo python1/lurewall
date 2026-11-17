@@ -95,6 +95,7 @@ class RunResult:
     counts: Counter = field(default_factory=Counter)
     outcomes: Counter = field(default_factory=Counter)
     canaries: Counter = field(default_factory=Counter)  # (placement, lure) -> hits
+    would_reasons: Counter = field(default_factory=Counter)  # why a would_block was not a block
     signal_keys: set = field(default_factory=set)
     counted_hits: int = 0
     dry_run: bool | None = None
@@ -136,6 +137,8 @@ def _collect(result: RunResult, entries: list[Entry]) -> None:
             if kind == "canary_hit":
                 result.counted_hits += weight  # a roll-up cannot show counted: assume it was
         result.counts[kind] += weight
+        if item.type == "would_block":
+            result.would_reasons[str(item.detail.get("reason"))] += 1
         if item.type == "decision":
             result.outcomes[str(item.detail.get("outcome"))] += 1
         if item.type == "canary_hit":
@@ -180,7 +183,11 @@ def _judge(result: RunResult) -> None:
             f"{t['canary_hit']} canary hits, {t['attack_signal']} attack signals",
         )
     elif case == 7:
-        verdict(result.outcomes["allowlisted"] >= 1 and acted == 0, "allowlisted decision")
+        allowlisted = result.would_reasons["allowlisted"]
+        verdict(
+            allowlisted >= 1 and enforced == 0,
+            f"{allowlisted} would_block (allowlisted), {enforced} block",
+        )
     elif case == 8:
         verdict(
             t["cross_site"] >= 1 and result.counted_hits == 0 and acted == 0,
