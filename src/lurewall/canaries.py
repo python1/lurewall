@@ -64,8 +64,9 @@ PLACEMENTS: dict[str, tuple[str, str]] = {
 EXAMPLE_MARKER = "EXAMPLE-NOT-A-REAL-CANARY"
 
 # Segments a decoy must never contain: a bait request has to stay a canary hit
-# and never look like a sensitive-path probe. The per-site attack-path list
-# arrives with the signals; these are the names no site should use as a decoy.
+# and never look like a sensitive-path probe. These are the names no site
+# should use as a decoy; the per-site attack-path list is checked against the
+# canary table separately (sigconfig.check_against_site).
 RESERVED_SEGMENTS = frozenset(
     {
         "admin", "administrator", "wp-admin", "wp-login.php", "wp-content", "wp-includes",

