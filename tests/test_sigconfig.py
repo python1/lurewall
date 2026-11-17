@@ -34,8 +34,19 @@ def test_shipped_lab_config_fits_the_lab_site_for_many_installations():
         sigconfig.check_against_site(config, sig.canary_set(seed), labsite.site_routes())
 
 
+def test_shipped_lab_config_as_shipped_fits_the_lab_site():
+    config = sig.shipped_config()
+    for seed in SEEDS:
+        sigconfig.check_against_site(config, sig.canary_set(seed), labsite.site_routes())
+
+
+def test_a_twice_encoded_decoy_spelling_is_part_of_the_check():
+    assert any("%25" in spelling for spelling in sigconfig._spellings("/a/b.txt"))
+
+
 def test_minimal_config_gets_the_documented_defaults():
     config = sigconfig.parse(MINIMAL)
+    assert config.https is True
     assert config.window_ms == 15 * 60_000
     assert config.distinct_attack_signals == 2
     assert config.max_sources == 10_000
@@ -64,6 +75,8 @@ def test_threshold_can_be_raised():
         MINIMAL + "surprise = 1\n",
         MINIMAL + "[site2]\n",
         MINIMAL + '[attack_paths]\nbody = ["x"]\n',
+        'version = 1\n[site]\nhosts = ["a.test"]\nhttps = "no"\n',
+        'version = 1\n[site]\nhosts = ["a.test"]\nhttps = 0\n',
         MINIMAL + '[attack_paths]\nexact = "/.env"\n',
         MINIMAL + "[attack_paths]\nexact = [1]\n",
         MINIMAL + '[attack_paths]\nexact = [".env"]\n',

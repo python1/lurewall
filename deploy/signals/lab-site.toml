@@ -11,15 +11,20 @@ version = 1
 
 [site]
 # Every name and address the site is reached by. A request whose Referer names
-# any other host is cross-site and counts for nothing. Set these for the lab.
-hosts = ["lab.lurewall.test"]
+# any other host is cross-site and counts for nothing.
+hosts = ["192.168.1.160"]
+# The lab site is plain HTTP. Browsers send Sec-Fetch-Site only to secure
+# origins, so on this site the header is ignored: a real browser never sends
+# it here, and its presence is logged as a behavior signal.
+https = false
 # Loads of these are "ordinary browsing" when they succeed.
 asset_prefixes = ["/assets/"]
 asset_extensions = ["css", "js", "png", "jpg", "svg", "ico", "woff2"]
 
 [attack_paths]
-# Matched on the URI as sent and on its normalized form (percent-decoded once,
-# slashes merged, dot segments resolved, lowercased). Write rules in lowercase.
+# Matched on the URI as sent, on its normalized form (percent-decoded once,
+# slashes merged, dot segments resolved, lowercased), and on the path decoded
+# a second time (/%252eenv). Write rules in lowercase.
 
 # The path equals the rule.
 exact = [

@@ -37,6 +37,10 @@ BEHAVIOR = "behavior"
 
 RAW = "raw"
 NORMALIZED = "normalized"
+# Attack-path rules only: the path percent-decoded a second time, so /%252eenv
+# is the /.env probe. nginx decodes once and serves no such file, but nothing
+# honest double-encodes a dot in front of a sensitive name.
+DOUBLE_DECODED = "double_decoded"
 
 # The only signal kinds that may ever count toward a block. Timing, order and
 # header signals are not in this set and never will be.
@@ -48,6 +52,7 @@ BEHAVIOR_KINDS = frozenset(
         "no_accept_language",
         "prose_in_url",
         "prose_in_user_agent",
+        "unexpected_fetch_metadata",
         "steady_timing",
         "no_asset_loads",
         "methodical_order",
@@ -64,7 +69,7 @@ class Signal:
     cls: str  # ATTACK or BEHAVIOR
     kind: str
     rule: str  # the config rule or pattern family; never text from the request
-    form: str  # RAW or NORMALIZED: which spelling matched
+    form: str  # RAW, NORMALIZED or DOUBLE_DECODED: which spelling matched
 
     @property
     def key(self) -> str:
@@ -140,6 +145,12 @@ def _path_matches(config: SignalConfig, uri: str) -> list[tuple[str, str]]:
     if normal is not None:
         for rule in _match_path(config, normal):
             seen.setdefault(rule, NORMALIZED)
+        if "%" in normal:
+            # Decoded once more. Still a path nginx would accept, or nothing.
+            twice = nginx_normalize(normal)
+            if twice is not None:
+                for rule in _match_path(config, twice.lower()):
+                    seen.setdefault(rule, DOUBLE_DECODED)
     return list(seen.items())
 
 
@@ -234,7 +245,7 @@ def _host_key(host: str) -> str:
 
 def cross_site_reason(config: SignalConfig, sec_fetch_site: str, referer: str) -> str | None:
     """Why a request is cross-site, or None. The headers are untrusted text."""
-    if sec_fetch_site.strip().lower() == "cross-site":
+    if config.https and sec_fetch_site.strip().lower() == "cross-site":
         return "sec_fetch_site"
     referer = referer.strip()
     if not referer:
@@ -361,7 +372,11 @@ class Classifier:
         path = normalized_path(target)
 
         clean = not found and canary is None and reason is None
-        fetch_site = record.sec_fetch_site.strip().lower()
+        fetch_site = record.sec_fetch_site.strip().lower() if config.https else ""
+        behavior = _behavior(record, target)
+        if not config.https and record.sec_fetch_site.strip():
+            # No browser sends this header to a plain-HTTP site.
+            behavior.append(Signal(BEHAVIOR, "unexpected_fetch_metadata", "", RAW))
         asset = (
             clean
             and path is not None
@@ -376,7 +391,7 @@ class Classifier:
             cross_site=reason,
             canary=canary,
             attack=() if reason else found,
-            behavior=tuple(_behavior(record, target)),
+            behavior=tuple(behavior),
             suppressed=found if reason else (),
             asset=asset,
             browser_metadata=clean and fetch_site in ("same-origin", "same-site", "none"),

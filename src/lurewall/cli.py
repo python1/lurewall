@@ -92,6 +92,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     check.add_argument("--config", required=True, type=Path, help="the signals config (TOML)")
     check.add_argument("--state", required=True, type=Path, help=state_help)
+
+    engine_state_help = "the engine's saved state file (outside any git repository)"
+    status = commands.add_parser(
+        "status", help="show active blocks and any standing alert from the engine's saved state"
+    )
+    status.add_argument("--state", required=True, type=Path, help=engine_state_help)
+    alerts = commands.add_parser("alerts", help="standing alerts")
+    alert_commands = alerts.add_subparsers(dest="alert_command", required=True)
+    clear = alert_commands.add_parser("clear", help="clear the standing alert once reviewed")
+    clear.add_argument("--state", required=True, type=Path, help=engine_state_help)
     return parser
 
 
@@ -197,6 +207,41 @@ def _signals_command(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _engine_command(args: argparse.Namespace) -> int:
+    from lurewall import engine
+
+    if args.command == "alerts":
+        try:
+            engine.clear_alert(args.state)
+        except OSError as exc:
+            print(f"lurewall alerts: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        print("alert cleared")
+        return EXIT_OK
+    try:
+        status = engine.read_status(args.state)
+    except FileNotFoundError:
+        print("no engine state yet: no blocks, no alert")
+        return EXIT_OK
+    except (OSError, ValueError):
+        print("lurewall status: the engine state file could not be read", file=sys.stderr)
+        return EXIT_USAGE
+    if status["alert_standing"]:
+        print("WARNING: the block cap was reached and new blocks were refused.")
+        print("         Review, then run `lurewall alerts clear`.")
+    enforced = status["enforced_blocks"]
+    print(
+        f"active blocks: {status['active_blocks']} "
+        f"({enforced} enforced, {status['active_blocks'] - enforced} dry-run)"
+    )
+    print(f"sources with a counted canary hit: {status['sources_with_canary_hit']}")
+    for expiry, source, is_enforced in status["blocks"]:
+        kind = "enforced" if is_enforced else "dry-run"
+        print(f"  {source}\t{kind}\texpires at {expiry} ms")
+    # A standing alert is a failing status, so a monitor can watch the exit code.
+    return EXIT_FAIL if status["alert_standing"] else EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "verify":
@@ -205,6 +250,8 @@ def main(argv: list[str] | None = None) -> int:
         return _canary_command(args)
     if args.command == "signals":
         return _signals_command(args)
+    if args.command in ("status", "alerts"):
+        return _engine_command(args)
     return _key_command(args)
 
 
