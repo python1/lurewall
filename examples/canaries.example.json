@@ -1,0 +1,32 @@
+{
+  "example": "This file only shows the shape of a canary state file. It is public, so Lurewall refuses to load it. Real canaries are generated per installation by `lurewall lab-site build` and stored outside any repository.",
+  "version": 1,
+  "created_ms": 0,
+  "placeholder": "00000000000000000000000000000000",
+  "header_name": "X-Example-Header",
+  "hidden_class": "example-class",
+  "canaries": [
+    {
+      "id": "html_comment.instruction",
+      "placement": "html_comment",
+      "lure": "instruction",
+      "path": "/EXAMPLE-NOT-A-REAL-CANARY/instruction",
+      "param": "v",
+      "text": "EXAMPLE-NOT-A-REAL-CANARY: an instruction lure addresses the reader and points at {ref}.",
+      "form": "plain",
+      "body": "{\"status\":\"ok\"}\n",
+      "content_type": "application/json"
+    },
+    {
+      "id": "html_comment.bait",
+      "placement": "html_comment",
+      "lure": "bait",
+      "path": "/EXAMPLE-NOT-A-REAL-CANARY/bait.zip",
+      "param": "v",
+      "text": "EXAMPLE-NOT-A-REAL-CANARY: a bait lure gives no instruction",
+      "form": "link",
+      "body": "<html><head><title>Moved</title></head><body><p>Nothing to download here.</p></body></html>\n",
+      "content_type": "text/html"
+    }
+  ]
+}
