@@ -93,6 +93,38 @@ def _build_parser() -> argparse.ArgumentParser:
     check.add_argument("--config", required=True, type=Path, help="the signals config (TOML)")
     check.add_argument("--state", required=True, type=Path, help=state_help)
 
+    run = commands.add_parser(
+        "run",
+        help="run the service: tail the access log, collect signals, decide",
+        description=(
+            "Dry-run unless the engine config says otherwise. On startup the enforcement "
+            "adapter is reconciled with the saved state."
+        ),
+    )
+    run.add_argument("--access-log", required=True, type=Path, help="nginx's JSON access log")
+    run.add_argument("--reader-state", required=True, type=Path, help="the reader's position file")
+    run.add_argument("--event-log", required=True, type=Path, help="the signed event log")
+    run.add_argument("--key", required=True, type=Path, help="the signing key file")
+    run.add_argument("--canaries", required=True, type=Path, help=state_help)
+    run.add_argument("--signals", required=True, type=Path, help="the signals config (TOML)")
+    run.add_argument("--engine", required=True, type=Path, help="the engine config (TOML)")
+    run.add_argument("--engine-state", required=True, type=Path, help="the engine's saved state")
+    run.add_argument("--checkpoint", type=Path, help="where to write the signed checkpoint file")
+    run.add_argument("--once", action="store_true", help="process what is there, then exit")
+
+    sweep = commands.add_parser(
+        "sweep",
+        help="remove nftables entries that are past due (run by its own timer)",
+        description=(
+            "Reads expiry times from the live entries, so it works with the service stopped "
+            "and its state lost. Writes to its own signed log, not the service's. "
+            "Exit status: 0 done, 1 nft failed, 2 the log or key could not be used."
+        ),
+    )
+    sweep.add_argument("--event-log", required=True, type=Path, help="the sweeper's signed log")
+    sweep.add_argument("--key", required=True, type=Path, help="the signing key file")
+    sweep.add_argument("--nft", default="/usr/sbin/nft", help="the nft binary")
+
     engine_state_help = "the engine's saved state file (outside any git repository)"
     status = commands.add_parser(
         "status", help="show active blocks and any standing alert from the engine's saved state"
@@ -207,6 +239,54 @@ def _signals_command(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _service_command(args: argparse.Namespace) -> int:
+    import signal
+    import threading
+
+    from lurewall import service
+    from lurewall.eventlog import LogLockedError
+    from lurewall.signing import KeyFileError
+
+    name = f"lurewall {args.command}"
+    try:
+        if args.command == "sweep":
+            removed, ok = service.sweep(args.event_log, args.key, nft_path=args.nft)
+            if removed or not ok:
+                print(f"swept {removed} entries" + ("" if ok else "; nft failed"))
+            return EXIT_OK if ok else EXIT_FAIL
+        running = service.Service(
+            service.Paths(
+                access_log=args.access_log,
+                reader_state=args.reader_state,
+                event_log=args.event_log,
+                key=args.key,
+                canaries=args.canaries,
+                signals=args.signals,
+                engine_config=args.engine,
+                engine_state=args.engine_state,
+                checkpoint=args.checkpoint,
+            )
+        )
+    except (ValueError, OSError, KeyFileError, LogLockedError) as exc:
+        # Config, canary and key errors are ValueErrors written by Lurewall.
+        print(f"{name}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    mode = "dry-run" if running.config.dry_run else f"ENFORCING with {running.config.adapter}"
+    print(f"lurewall is running ({mode})", flush=True)
+    stop = threading.Event()
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, lambda *_: stop.set())
+    try:
+        if args.once:
+            while running.step():
+                pass
+        else:
+            running.run(stop)
+    finally:
+        running.close()
+    return EXIT_OK
+
+
 def _engine_command(args: argparse.Namespace) -> int:
     from lurewall import engine
 
@@ -250,6 +330,8 @@ def main(argv: list[str] | None = None) -> int:
         return _canary_command(args)
     if args.command == "signals":
         return _signals_command(args)
+    if args.command in ("run", "sweep"):
+        return _service_command(args)
     if args.command in ("status", "alerts"):
         return _engine_command(args)
     return _key_command(args)

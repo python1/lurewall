@@ -10,6 +10,13 @@ version = 1
 # stays on until test results justify enforcing.
 dry_run = true
 
+[enforcement]
+# What enforces a block once dry_run is false: "log-only" blocks nothing,
+# "nftables" adds timed entries to a set on this host. The nftables adapter is
+# for the isolated lab container and direct traffic only, never for a site
+# behind Cloudflare. Both settings must change before anything is enforced.
+adapter = "log-only"
+
 [canary]
 # A counted canary hit stays on its source this long, so waiting out the
 # attack window does not help.

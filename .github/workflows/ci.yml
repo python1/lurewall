@@ -69,6 +69,33 @@ jobs:
         env:
           LUREWALL_REQUIRE_NGINX: "1"
 
+  nft-integration:
+    # The nftables adapter against a real nft, as root inside a private network
+    # namespace (unshare --net), so the runner's own firewall is never touched.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Install nftables if the runner has none
+        run: |
+          set -euo pipefail
+          if ! command -v nft >/dev/null && [ ! -x /usr/sbin/nft ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends nftables
+          fi
+          PATH="$PATH:/usr/sbin" nft --version
+      - run: python -m pip install -e ".[dev]"
+      - name: Run the adapter tests against real nftables
+        run: |
+          set -euo pipefail
+          sudo unshare --net env LUREWALL_REQUIRE_NFT=1 PATH="$PATH:/usr/sbin" \
+            "$(command -v python)" -m pytest tests/test_nft.py -v -p no:cacheprovider
+
   secret-scan:
     runs-on: ubuntu-24.04
     env:

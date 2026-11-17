@@ -1,0 +1,46 @@
+# Lurewall main service: tails nginx's access log, collects signals, decides.
+#
+# Reference unit for the lab container. Paths assume a checkout at
+# /opt/lurewall and state under /var/lib/lurewall; adjust to the runbook.
+# Dry-run unless /etc/lurewall/engine.toml says otherwise.
+[Unit]
+Description=Lurewall (lab): canary and attack-signal detector
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lurewall
+Group=lurewall
+# Read access to nginx's log.
+SupplementaryGroups=adm
+ExecStart=/opt/lurewall/.venv/bin/lurewall run \
+    --access-log /var/log/nginx/lurewall.json.log \
+    --reader-state /var/lib/lurewall/reader.state \
+    --event-log /var/lib/lurewall/events.log \
+    --key /var/lib/lurewall/keys/lurewall.key \
+    --canaries /var/lib/lurewall/canaries.json \
+    --signals /etc/lurewall/signals.toml \
+    --engine /etc/lurewall/engine.toml \
+    --engine-state /var/lib/lurewall/engine.json \
+    --checkpoint /var/lib/lurewall/checkpoint/checkpoint.json
+Restart=on-failure
+RestartSec=5
+
+# nftables needs CAP_NET_ADMIN and nothing else. Without the nftables adapter
+# both lines can be emptied.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+ReadWritePaths=/var/lib/lurewall
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
