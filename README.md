@@ -86,9 +86,10 @@ field as untrusted data.
   Past a per-minute budget, failures are counted in one `parse_failure_rollup`
   event with a digest of the lines it covers.
 - **Hostile bytes.** nginx's `escape=json` leaves bytes above 126 alone, so
-  invalid UTF-8 can reach the log. The reader decodes it with replacement
-  characters and marks the record. This has been tested against lines built to
-  nginx's documented escaping, not yet against a real nginx.
+  invalid UTF-8 reaches the log as raw bytes. The reader decodes it with
+  replacement characters and marks the record. CI checks this against a real
+  nginx (1.24 on the test runner) as well as against built fixtures; the lab's
+  own nginx is still to be checked when it exists.
 - **Rotation and restart.** The reader follows logrotate by inode, finishes the
   old file before moving on, and resumes from a saved offset. If lines can no
   longer be read (the rotated file is gone, or the file was cut short), it
