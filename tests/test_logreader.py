@@ -262,9 +262,12 @@ def test_rotated_file_gone_is_a_logged_gap_not_a_silent_skip(make_reader, access
     saved_inode, saved_offset = access.stat().st_ino, access.stat().st_size
     append(access, numbered(4, 6))
     rotate(access)
+    # The new file is created while the old one still exists, so the old inode
+    # number cannot be handed to it (Linux reuses a freed number at once; that
+    # case is the same-inode tests below).
+    append(access, numbered(7, 8))
     shutil.copy(str(access) + ".1", str(access) + ".1.gz")  # "compressed": a new inode
     os.unlink(str(access) + ".1")
-    append(access, numbered(7, 8))
     assert uris(make_reader().poll()) == expect_uris(7, 8)
     (gap,) = events(sink, "rotation_gap")
     assert gap.detail == {
