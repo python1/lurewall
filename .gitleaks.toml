@@ -1,0 +1,5 @@
+# Secret-scan config. Uses gitleaks' built-in rules with no allowlist:
+# the repo holds no secrets, real or sample. Test fixtures that need key
+# material generate it at run time.
+[extend]
+useDefault = true
