@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import random
+from dataclasses import replace
 from pathlib import Path
 
 import nginx_emu
@@ -17,16 +18,23 @@ HOST = "lab.lurewall.test"
 BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"
 
 
-def lab_config() -> sigconfig.SignalConfig:
+def shipped_config() -> sigconfig.SignalConfig:
+    """The lab config exactly as shipped: plain HTTP, reached by address."""
     return sigconfig.load(LAB_CONFIG)
+
+
+def lab_config() -> sigconfig.SignalConfig:
+    """The shipped rules on an HTTPS site with a name, where fetch metadata applies."""
+    return replace(shipped_config(), https=True, hosts=frozenset({HOST}))
 
 
 def canary_set(seed: int = 1):
     return canaries.generate(labsite.site_routes(), rng=random.Random(seed), now_ms=1)
 
 
-def classifier(seed: int = 1) -> Classifier:
-    return Classifier(lab_config(), canary_set(seed), labsite.site_routes())
+def classifier(seed: int = 1, *, shipped: bool = False) -> Classifier:
+    config = shipped_config() if shipped else lab_config()
+    return Classifier(config, canary_set(seed), labsite.site_routes())
 
 
 def rec(

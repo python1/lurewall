@@ -12,7 +12,15 @@ import nginx_emu
 import sig
 from conftest import HOSTILE_STRINGS
 from lurewall import accesslog, signals
-from lurewall.signals import ATTACK, ATTACK_KINDS, BEHAVIOR, BEHAVIOR_KINDS, NORMALIZED, RAW
+from lurewall.signals import (
+    ATTACK,
+    ATTACK_KINDS,
+    BEHAVIOR,
+    BEHAVIOR_KINDS,
+    DOUBLE_DECODED,
+    NORMALIZED,
+    RAW,
+)
 
 CLASSIFIER = sig.classifier()
 CONFIG = CLASSIFIER.config
@@ -65,6 +73,13 @@ PATH_CASES = [
     ("/phpMyAdmin/index.php", "path:/phpmyadmin", NORMALIZED),
     ("/PhpMyAdmin/", "path:/phpmyadmin", NORMALIZED),
     ("http://lab.lurewall.test/.env", "path:*/.env", RAW),
+    ("/%252eenv", "path:*/.env", DOUBLE_DECODED),
+    ("/%252Eenv", "path:*/.env", DOUBLE_DECODED),
+    ("/%25%32%65env", "path:*/.env", DOUBLE_DECODED),
+    ("/app/%252egit/config", "path:*/.git", DOUBLE_DECODED),
+    ("/%2561dmin/x", "path:/admin", DOUBLE_DECODED),
+    ("/%2541DMIN", "path:/admin", DOUBLE_DECODED),
+    ("//wp-login%252ephp", "path:/wp-login.php", DOUBLE_DECODED),
     ("HTTP://other.example/%2eenv", "path:*/.env", NORMALIZED),
 ]
 
@@ -103,7 +118,9 @@ def test_a_path_hidden_behind_dot_segments_is_caught_in_its_raw_form():
         "/x/wp-login.php",  # an exact rule is the whole path
         "/?page=admin",  # a path rule never matches the query string
         "/search?q=.env",
-        "/%252eenv",  # decoded once, as nginx does: a file literally named %2eenv
+        "/%25252eenv",  # three layers of encoding: not matched
+        "/x%25y",
+        "/search?q=%252eenv",  # twice-decoded matching is for the path only
         "",
         "*",
     ],
@@ -510,3 +527,67 @@ def test_only_a_bounded_prefix_of_a_uri_is_pattern_matched():
     assert attack("/?<script>" + padding) == ["injection:xss"]
     # A path rule sits at the front of the URI, so padding cannot push it out.
     assert attack("/.env?" + padding) == ["path:*/.env"]
+
+
+# -- twice-decoded paths: attack-path rules only -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "/?q=1%2527%2520OR%25201=1",
+        "/?q=%253Cscript%253E",
+        "/?next=https%253A%252F%252Fexample.org%252F..%252Fx",
+        "/docs/%252e%252e/secret",
+        "/%253Cscript%253E",
+    ],
+)
+def test_injection_patterns_are_not_matched_twice_decoded(uri):
+    assert attack(uri) == []
+
+
+def test_a_twice_encoded_decoy_is_neither_a_decoy_nor_an_attack_path():
+    for canary in CANARIES.canaries:
+        twice = "".join(c if c == "/" else f"%25{ord(c):02x}" for c in canary.path)
+        result = CLASSIFIER.classify(sig.rec(twice))
+        assert result.canary is None  # nginx decodes once and finds no such location
+        assert result.attack == ()
+
+
+def test_a_twice_decoded_path_nginx_would_refuse_matches_nothing():
+    assert attack("/%252e%252e/%252e%252e/x") == []
+    assert attack("/%2500/.env") == ["path:*/.env"]  # the raw form still shows the probe
+
+
+# -- a plain-HTTP site: browsers send no fetch metadata there ------------------------------
+
+HTTP = sig.classifier(shipped=True)
+
+
+def test_the_shipped_lab_config_is_plain_http_at_the_lab_address():
+    assert HTTP.config.https is False
+    assert HTTP.config.hosts == frozenset({"192.168.1.160"})
+
+
+@pytest.mark.parametrize("value", ["cross-site", "Cross-Site", "same-origin", "none", "x"])
+def test_on_plain_http_the_fetch_metadata_header_is_ignored_and_logged(value):
+    result = HTTP.classify(sig.rec("/.env", sfs=value))
+    # The header cannot hide a probe here: no browser would have sent it.
+    assert result.cross_site is None
+    assert sig.keys(result.attack) == ["path:*/.env"]
+    assert "unexpected_fetch_metadata" in [s.kind for s in result.behavior]
+    clean = HTTP.classify(sig.rec("/docs/", sfs=value))
+    assert not clean.browser_metadata  # nor is it evidence of ordinary browsing
+    assert clean.attack == ()
+
+
+def test_on_plain_http_the_referer_still_marks_a_request_cross_site():
+    result = HTTP.classify(sig.rec("/.env", referer="http://evil.example/frame.html"))
+    assert result.cross_site == "referer" and result.attack == ()
+    same = HTTP.classify(sig.rec("/.env", referer="http://192.168.1.160/docs/"))
+    assert same.cross_site is None and sig.keys(same.attack) == ["path:*/.env"]
+
+
+def test_on_plain_http_asset_loads_are_still_ordinary_browsing():
+    result = HTTP.classify(sig.rec("/assets/site.css", referer="http://192.168.1.160/"))
+    assert result.asset and result.behavior == ()

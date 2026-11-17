@@ -178,15 +178,22 @@ lurewall signals check --config deploy/signals/lab-site.toml --state /outside/an
 - **Raw and normalized.** Every URI is matched as sent and in a normalized
   form (percent-decoded once, slashes merged, dot segments resolved,
   lowercased), so `/%2eenv`, `//.env` and `/.ENV` are all the `/.env` probe,
-  and they are one signal, not three.
+  and they are one signal, not three. Attack-path rules are also matched on
+  the path decoded a second time, so `/%252eenv` is the same probe; injection
+  patterns are not, because query strings carry double-encoded URLs honestly.
 - **Path and query only.** Injection patterns look at the path and query
   string. No request body is logged, so nothing reads one.
 - **Cross-site counts for nothing.** A request marked `Sec-Fetch-Site:
   cross-site`, or with a Referer from another host, yields no attack signal
-  and no canary hit. It is logged as `cross_site`.
-- **Two distinct attack signals.** The attack threshold is two or more
-  distinct signals from one source inside 15 minutes. Repeats and spelling
-  variants of one probe are one signal.
+  and no canary hit. It is logged as `cross_site`, and the probes it carried
+  are kept per source so a decision can say they were seen.
+- **Plain HTTP.** Browsers send `Sec-Fetch-Site` only to secure origins. The
+  config says whether the site is HTTPS; on a plain-HTTP site, such as the
+  lab's, the header is ignored and its presence is logged as a behavior signal.
+- **Two distinct attack signals, two requests.** The attack threshold is two
+  or more distinct signals from one source inside 15 minutes, from at least
+  two separate requests. Repeats and spelling variants of one probe are one
+  signal, and one request that raises two signals is not enough.
 - **Sources.** A source is an IPv4 address or an IPv6 /64. The per-source
   table has a fixed size; the source idle longest is dropped first and every
   drop is logged.
@@ -198,12 +205,12 @@ Nothing in this part decides or blocks. It writes `attack_signal`,
 `attack_threshold_met`, `behavior_signal`, `cross_site` and
 `signal_state_evicted` events, none of which holds text from a request.
 
-Limits: a client can send `Sec-Fetch-Site: cross-site` itself and have its
-probes count for nothing; the filter protects third parties, it does not catch
-attackers. One request can carry two distinct signals (`/a/../.env` is a path
-probe and a traversal). A double-encoded path (`/%252eenv`) is decoded once, as
-nginx does, and is not matched. Fetch metadata is easy to fake, which only ever
-stops a TTL from doubling. At the table's size limit a flood of new sources
+Limits: a client can send a Referer from another host (or, on an HTTPS site,
+`Sec-Fetch-Site: cross-site`) and have its probes count for nothing. That is
+deliberate: a source that really read the site holds a canary hit for days,
+and if cross-site probes counted, any page with two image tags could get that
+source blocked. The filter protects third parties; it does not catch attackers.
+Fetch metadata is easy to fake, which only ever stops a TTL from doubling. At the table's size limit a flood of new sources
 pushes out older ones, attack state included.
 
 ## Development

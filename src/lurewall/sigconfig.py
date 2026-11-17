@@ -49,6 +49,9 @@ class SignalConfigError(ValueError):
 @dataclass(frozen=True)
 class SignalConfig:
     hosts: frozenset[str]  # names and addresses the site is reached by
+    # Browsers send Sec-Fetch-Site only to secure origins. On a plain-HTTP site
+    # a real browser never sends it, so the header is ignored there.
+    https: bool
     asset_prefixes: tuple[str, ...]
     asset_extensions: frozenset[str]
     exact: frozenset[str]  # the normalized path equals this
@@ -121,7 +124,10 @@ def parse(raw: bytes | str) -> SignalConfig:
     if type(doc.get("version")) is not int or doc["version"] != CONFIG_VERSION:
         raise SignalConfigError(f"version must be {CONFIG_VERSION}")
 
-    site = _table(doc, "site", {"hosts", "asset_prefixes", "asset_extensions"})
+    site = _table(doc, "site", {"hosts", "https", "asset_prefixes", "asset_extensions"})
+    https = site.get("https", True)
+    if type(https) is not bool:
+        raise SignalConfigError("site.https must be true or false")
     hosts = _strings(site, "site", "hosts", _HOST_RE)
     if not hosts:
         raise SignalConfigError(
@@ -154,6 +160,7 @@ def parse(raw: bytes | str) -> SignalConfig:
     limits = _table(doc, "thresholds", {"window_minutes", "distinct_attack_signals", "max_sources"})
     return SignalConfig(
         hosts=frozenset(hosts),
+        https=https,
         asset_prefixes=tuple(_strings(site, "site", "asset_prefixes", _PREFIX_RE)),
         asset_extensions=frozenset(_strings(site, "site", "asset_extensions", _EXTENSION_RE)),
         exact=frozenset(exact),
@@ -215,7 +222,7 @@ def check_against_site(config: SignalConfig, canary_set, real_paths: Iterable[st
     for route in sorted(set(real_paths)):
         if collision_key(route) == "/":
             continue
-        for spelling in (route, collision_key(route)):
+        for spelling in (route, collision_key(route), _encoded(route).replace("%", "%25")):
             rules = signals.match_attack_paths(config, spelling)
             if rules:
                 problems.append(f"real site path {route} matches attack path rule {rules[0]}")
@@ -226,6 +233,11 @@ def check_against_site(config: SignalConfig, canary_set, real_paths: Iterable[st
         )
 
 
+def _encoded(path: str) -> str:
+    return "".join(char if char == "/" else f"%{ord(char):02x}" for char in path)
+
+
 def _spellings(path: str) -> list[str]:
-    encoded = "".join(f"%{ord(char):02x}" if char != "/" else "/" for char in path)
-    return [path, path.lower(), path.upper(), encoded, path.replace("/", "//"), path + "/"]
+    once = _encoded(path)
+    twice = once.replace("%", "%25")
+    return [path, path.lower(), path.upper(), once, twice, path.replace("/", "//"), path + "/"]

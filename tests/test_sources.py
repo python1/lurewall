@@ -86,6 +86,90 @@ def test_two_distinct_attack_signals_meet_the_threshold():
     assert second.threshold_met
 
 
+# -- at least two separate requests ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "/a/../.env",  # a path probe and a traversal
+        "/.env/../.git/config",  # two path rules and a traversal
+        "/admin?q=<script>alert(1)</script>",
+        "/.env?id=1'+or+'1'='1&x=${jndi:ldap://x}",
+    ],
+)
+def test_one_request_with_several_signals_does_not_meet_the_threshold(uri):
+    table = tracker()
+    view = feed(table, uri)
+    assert len(view.attack_keys) >= 2
+    assert view.attack_requests == 1
+    assert not view.threshold_met
+
+
+def test_the_same_request_read_twice_is_still_one_request():
+    # Delivery is at-least-once: after a crash a line can be read again.
+    table = tracker()
+    record = sig.rec("/a/../.env")
+    for _ in range(3):
+        view = table.observe(record, CLASSIFIER.classify(record))
+    assert view.attack_requests == 1 and not view.threshold_met
+
+
+def test_a_second_request_completes_the_threshold():
+    table = tracker()
+    feed(table, "/a/../.env")
+    view = feed(table, "/.env", at=10)  # nothing new, but a second request
+    assert view.attack_requests == 2 and view.threshold_met
+
+
+def test_the_two_requests_must_be_inside_the_window():
+    table = tracker()
+    feed(table, "/a/../.env")
+    view = feed(table, "/", at=5)
+    assert not view.threshold_met
+    late = feed(table, "/b/../.git/x", at=16 * MINUTE)
+    assert late.attack_requests == 1 and not late.threshold_met
+
+
+def test_two_requests_with_one_signal_between_them_do_not_qualify():
+    table = tracker()
+    feed(table, "/.env")
+    view = feed(table, "/%2eenv", at=5)
+    assert view.attack_requests == 2 and view.attack_keys == ("path:*/.env",)
+    assert not view.threshold_met
+
+
+def test_the_request_count_per_source_is_bounded():
+    table = tracker()
+    view = None
+    for n in range(500):
+        view = feed(table, f"/.env?n={n}", at=n)
+    assert view.attack_requests == sources.MAX_KEYS_PER_SOURCE
+
+
+def test_cross_site_probes_are_kept_apart_and_never_counted():
+    table = tracker()
+    view = None
+    for n, uri in enumerate(["/.env", "/.git/config", "/admin"]):
+        view = feed(table, uri, at=n, referer="https://evil.example/")
+    assert view.cross_site_keys == ("path:*/.env", "path:*/.git", "path:/admin")
+    assert view.attack_keys == () and view.attack_requests == 0 and not view.threshold_met
+    assert feed(table, "/", at=16 * MINUTE).cross_site_keys == ()
+
+
+def test_forget_attack_drops_signals_but_not_the_rest():
+    table = tracker()
+    feed(table, "/assets/site.css")
+    feed(table, "/.env")
+    assert feed(table, "/.git/config").threshold_met
+    table.forget_attack("192.0.2.10")
+    view = table.view("192.0.2.10")
+    assert view.attack_keys == () and view.attack_requests == 0 and not view.threshold_met
+    assert view.normal_browsing
+    table.forget_attack("198.51.100.200")  # unknown source: nothing to do
+    assert not feed(table, "/admin", at=5).threshold_met
+
+
 def test_one_stray_admin_request_does_not_qualify():
     assert not feed(tracker(), "/admin").threshold_met
 
