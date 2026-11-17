@@ -141,12 +141,13 @@ def lab(tmp_path_factory):
         "}\n"
     )
     command = [NGINX, "-e", str(base / "error.log"), "-p", str(base), "-c", str(conf)]
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)  # noqa: S603
+    output_file = open(base / "nginx.out", "wb")  # noqa: SIM115 - closed in the finally below
+    process = subprocess.Popen(command, stdout=output_file, stderr=subprocess.STDOUT)  # noqa: S603
     try:
         deadline = time.monotonic() + 15
         while True:
             if process.poll() is not None:
-                output = process.stdout.read().decode(errors="replace")
+                output = (base / "nginx.out").read_text(errors="replace")
                 errors = (base / "error.log").read_text() if (base / "error.log").exists() else ""
                 pytest.fail(f"nginx exited at startup:\n{output}\n{errors}")
             with contextlib.suppress(OSError), socket.create_connection(("127.0.0.1", port), 0.2):
@@ -161,6 +162,8 @@ def lab(tmp_path_factory):
             process.wait(timeout=10)
         if process.poll() is None:
             process.kill()
+            process.wait()
+        output_file.close()
 
 
 def fresh_ua() -> str:

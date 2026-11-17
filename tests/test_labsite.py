@@ -192,9 +192,16 @@ def test_every_canary_reference_on_a_page_carries_the_request_id_placeholder(bui
 def test_nginx_replaces_the_placeholder_with_the_request_id_everywhere(built):
     canary_set, result = built
     conf = result.nginx_conf.read_text()
-    assert f"sub_filter '{canary_set.placeholder}' '$request_id';" in conf
-    assert "sub_filter_once off;" in conf
-    assert "sub_filter_types text/plain;" in conf  # robots.txt; text/html is always filtered
+    stamp = f"sub_filter '{canary_set.placeholder}' '$request_id';"
+    # Pages, error pages and the API page are stamped; decoys and assets are not.
+    for location in ("location / {", "location /errors/ {", "location = /developers/api.html {"):
+        block = conf.split(location, 1)[1].split("\n    }", 1)[0]
+        assert stamp in block and "sub_filter_once off;" in block
+        assert "sub_filter_types text/plain;" in block  # robots.txt; text/html is always on
+    assert conf.count(stamp) == 3
+    for canary in canary_set.canaries:
+        block = conf.split(f"location = {canary.path} {{", 1)[1].split("\n    }", 1)[0]
+        assert "sub_filter" not in block
     assert 'add_header Cache-Control "no-store" always;' in conf
     assert "proxy_pass" not in conf  # still a static site and a log reader, no proxy
 
