@@ -66,6 +66,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="where the output will live on the web server, if not the output directory",
     )
     build.add_argument("--listen", default="80", help="nginx listen value (default: 80)")
+    build.add_argument(
+        "--checkpoint-file",
+        help="serve this signed checkpoint file at /lurewall-checkpoint.json (absolute path)",
+    )
 
     canaries = commands.add_parser("canaries", help="this installation's canaries")
     canary_commands = canaries.add_subparsers(dest="canary_command", required=True)
@@ -134,7 +138,182 @@ def _build_parser() -> argparse.ArgumentParser:
     alert_commands = alerts.add_subparsers(dest="alert_command", required=True)
     clear = alert_commands.add_parser("clear", help="clear the standing alert once reviewed")
     clear.add_argument("--state", required=True, type=Path, help=engine_state_help)
+
+    lab = commands.add_parser("lab", help="the lab test harness (run on the Mac or Alienware)")
+    lab_commands = lab.add_subparsers(dest="lab_command", required=True)
+    lab_commands.add_parser("list", help="list the test cases")
+    case = lab_commands.add_parser(
+        "case",
+        help="run one test case from this machine and record the run in the ledger",
+        description="Plain GET requests to the lab target only. Refuses any public address.",
+    )
+    case.add_argument("number", type=int, help="the case number (1-20)")
+    case.add_argument(
+        "--from", dest="source", required=True, help="mac, alienware, or this machine's LAN IP"
+    )
+    case.add_argument("--target", default="http://192.168.1.160", help="the lab site")
+    case.add_argument("--ledger", type=Path, help="the run ledger (default ~/lurewall-lab)")
+    case.add_argument("--label", default="", help="agent, model and version, for agent cases")
+    case.add_argument("--part", default="", help="cases 10 and 12: which half of the case")
+    case.add_argument("--reference", default="", help="case 10: the reference to request")
+    case.add_argument("--scripted", action="store_true", help="case 2: scripted rehearsal")
+    case.add_argument("--watch", action="store_true", help="case 13: time the block")
+    results = lab_commands.add_parser(
+        "results",
+        help="verify the signed log, join it with the ledger, write results.md and results.csv",
+        description="Exit status: 0 written, 1 the log does not verify, 2 inputs unusable.",
+    )
+    results.add_argument("--log", required=True, type=Path, help="a copy of the signed log")
+    results.add_argument("--pubkey", required=True, help="the published public key, or a file")
+    results.add_argument("--anchors", action="append", type=Path, default=[], metavar="PATH")
+    results.add_argument(
+        "--ledger",
+        action="append",
+        type=Path,
+        default=[],
+        help="a run ledger (repeatable: one from each client; default ~/lurewall-lab)",
+    )
+    results.add_argument("--out", required=True, type=Path, help="output directory")
+    results.add_argument(
+        "--allow-unverified", action="store_true", help="export anyway, marked UNVERIFIED"
+    )
+    tamper = lab_commands.add_parser("tamper", help="case 6: verify four damaged copies of a log")
+    tamper.add_argument("--log", required=True, type=Path, help="a copy of the signed log")
+    tamper.add_argument("--pubkey", required=True, help="the published public key, or a file")
+    tamper.add_argument("--anchors", action="append", type=Path, default=[], metavar="PATH")
+    tamper.add_argument("--work", required=True, type=Path, help="where to write the copies")
+
+    checkpoint = commands.add_parser("checkpoint", help="the anchored checkpoints")
+    checkpoint_commands = checkpoint.add_subparsers(dest="checkpoint_command", required=True)
+    pull = checkpoint_commands.add_parser(
+        "pull",
+        help="fetch the lab's checkpoint, check it, store and commit it (Mac job)",
+        description=(
+            "Exit status: 0 stored or unchanged, 1 refused (bad signature, a different "
+            "checkpoint for a stored sequence number, or one that went backwards), "
+            "2 not fetched."
+        ),
+    )
+    pull.add_argument(
+        "--url", default="http://192.168.1.160/lurewall-checkpoint.json", help="checkpoint URL"
+    )
+    pull.add_argument("--pubkey", required=True, help="the published public key, or a file")
+    pull.add_argument("--repo", required=True, type=Path, help="local checkpoints repository")
+    pull.add_argument("--ots", help="path to the OpenTimestamps client, to stamp each checkpoint")
+    pull.add_argument("--push", action="store_true", help="git push after committing")
     return parser
+
+
+def _lab_command(args: argparse.Namespace) -> int:
+    from lurewall import labcases, labclient, results, signing, verify
+
+    name = f"lurewall lab {args.lab_command}"
+    if args.lab_command == "list":
+        for case in labcases.CASES.values():
+            flag = " [dry-run only]" if case.dry_run_only else ""
+            print(f"{case.number:>2}  {case.kind:<8} {case.title}{flag}")
+        return EXIT_OK
+    if args.lab_command == "case":
+        ledger = args.ledger or labcases.default_ledger()
+        case = labcases.CASES.get(args.number)
+        if case is None:
+            print(f"{name}: no case {args.number}", file=sys.stderr)
+            return EXIT_USAGE
+        try:
+            client = labclient.Client(labclient.parse_target(args.target))
+            ctx = labcases.Context(
+                client=client,
+                source=labcases.source_address(args.source),
+                label=args.label,
+                part=args.part,
+                reference=args.reference,
+                scripted=args.scripted,
+                watch=args.watch,
+            )
+            print(f"case {case.number}: {case.title}")
+            print(f"  expected: {case.expect}")
+            record = labcases.run_case(case, ctx)
+        except ValueError as exc:
+            print(f"{name}: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        labcases.append_run(ledger, record)
+        print(f"recorded run {record['run']}: {record['sent']} requests, {record['statuses']}")
+        return EXIT_OK
+    try:
+        public_key = signing.read_public_key(args.pubkey)
+    except ValueError as exc:
+        print(f"{name}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    if args.lab_command == "tamper":
+        try:
+            copies = labcases.tamper_copies(args.log, args.work)
+        except (OSError, ValueError) as exc:
+            print(f"{name}: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        caught = 0
+        for kind, path in copies.items():
+            report = verify.verify_log(path, public_key, args.anchors)
+            bad = report.bad_entry
+            if bad is not None:
+                where = f"first bad entry at line {bad.line} ({bad.reason})"
+            elif report.truncated_missing:
+                where = (
+                    f"truncated: {report.truncated_missing} entries missing after the last "
+                    f"anchor match (seq {report.last_matched_anchor_seq})"
+                )
+            else:
+                where = "NOT CAUGHT"
+            caught += not report.ok
+            print(f"{kind:<9} {where}")
+        return EXIT_OK if caught == len(copies) else EXIT_FAIL
+    try:
+        runs = [
+            run for path in (args.ledger or [labcases.default_ledger()])
+            for run in labcases.read_runs(path)
+        ]  # fmt: skip
+        runs.sort(key=lambda run: run["started_ms"])
+        report, rows, written = results.export(
+            args.log,
+            public_key,
+            args.anchors,
+            runs,
+            args.out,
+            allow_unverified=args.allow_unverified,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"{name}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    if not written:
+        print(f"{name}: the log does not verify; nothing exported", file=sys.stderr)
+        print(verify.format_report(report), file=sys.stderr)
+        return EXIT_FAIL
+    if not args.anchors:
+        print("note: no anchors given, so truncation after the last entry cannot be seen")
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row.verdict] = counts.get(row.verdict, 0) + 1
+    print(", ".join(f"{count} {verdict}" for verdict, count in sorted(counts.items())))
+    for path in written:
+        print(f"wrote {path}")
+    return EXIT_OK if report.ok else EXIT_FAIL
+
+
+def _checkpoint_command(args: argparse.Namespace) -> int:
+    from lurewall import anchorjob, signing
+
+    try:
+        public_key = signing.read_public_key(args.pubkey)
+        result = anchorjob.pull(args.url, public_key, args.repo, ots=args.ots, push=args.push)
+    except (ValueError, OSError) as exc:
+        print(f"lurewall checkpoint pull: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    if result.status == "fetch_failed":
+        print("lurewall checkpoint pull: could not fetch the checkpoint", file=sys.stderr)
+        return EXIT_USAGE
+    done = [word for word, flag in (("stamped", result.stamped), ("committed", result.committed),
+            ("pushed", result.pushed)) if flag]  # fmt: skip
+    print(f"checkpoint {result.seq}: {result.status}" + (f" ({', '.join(done)})" if done else ""))
+    return EXIT_OK if result.ok else EXIT_FAIL
 
 
 def _verify(args: argparse.Namespace) -> int:
@@ -186,7 +365,11 @@ def _canary_command(args: argparse.Namespace) -> int:
                 canaries.save_state(canary_set, args.state)
                 print(f"generated a new canary set: {args.state}")
             result = labsite.build(
-                canary_set, args.out, deploy_root=args.deploy_root, listen=args.listen
+                canary_set,
+                args.out,
+                deploy_root=args.deploy_root,
+                listen=args.listen,
+                checkpoint_file=args.checkpoint_file,
             )
             counts = canary_set.lure_counts()
             print(f"site built: {result.web_root}")
@@ -334,6 +517,10 @@ def main(argv: list[str] | None = None) -> int:
         return _service_command(args)
     if args.command in ("status", "alerts"):
         return _engine_command(args)
+    if args.command == "lab":
+        return _lab_command(args)
+    if args.command == "checkpoint":
+        return _checkpoint_command(args)
     return _key_command(args)
 
 

@@ -23,7 +23,7 @@ ExecStart=/opt/lurewall/.venv/bin/lurewall run \
     --signals /etc/lurewall/signals.toml \
     --engine /etc/lurewall/engine.toml \
     --engine-state /var/lib/lurewall/engine.json \
-    --checkpoint /var/lib/lurewall/checkpoint/checkpoint.json
+    --checkpoint /srv/lurewall/checkpoint/checkpoint.json
 Restart=on-failure
 RestartSec=5
 
@@ -39,7 +39,8 @@ PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
-ReadWritePaths=/var/lib/lurewall
+# The checkpoint lives where nginx can read it; it holds no visitor data.
+ReadWritePaths=/var/lib/lurewall /srv/lurewall/checkpoint
 UMask=0077
 
 [Install]
