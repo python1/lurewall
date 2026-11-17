@@ -35,22 +35,72 @@ combines them behind one gate and reports what a lab test shows.
 
 ## Status
 
-This repository currently holds the project scaffold only: packaging, CI and
-policies. There is no detector, no log and no command to run yet.
+Built so far: the project scaffold and the signed event log. There is no
+detector, no canary and no blocking yet.
+
+## The signed log
+
+Every event is one line of canonical JSON holding `seq`, `ts`, `type`,
+`source`, `detail`, `prev_hash` and `sig`. Each line carries the SHA-256 of the
+line before it and an Ed25519 signature, so editing, removing or reordering a
+line breaks the chain at that line. Signing reuses
+[eureka_protocol](https://github.com/python1/eureka_protocol)'s scheme.
+
+Every so often the writer signs the hash of the newest entry into a small
+checkpoint file. A checkpoint holds a sequence number, a hash, a time and a
+signature, and nothing about any visitor. Copies kept somewhere the lab box
+cannot change are called anchors.
+
+```sh
+lurewall keygen --key /path/outside/the/repo/lurewall.key   # prints the public key
+lurewall verify --log events.log --pubkey <public key> --anchors <file or directory>
+```
+
+`verify` prints the first bad entry, if any, and exits 0 only if the log
+verifies. Its output never includes log content, because that text is
+attacker-controlled.
+
+**What a pass proves, and what it doesn't.** Entries up to the last anchor
+that matches have not been edited, removed or reordered since that anchor was
+made. Entries after the last anchor are signed and chained, but whoever holds
+the signing key, the operator included, could rewrite or remove them without
+detection. Without anchors, `verify` cannot detect entries removed from the
+end of the log at all. The log shows what Lurewall recorded; it is not
+independent proof of what happened on the network. `verify` checks checkpoint
+signatures, not OpenTimestamps proofs.
+
+Flood and failure behaviour: repeats of one event from one source are counted
+and written as one `rollup` entry per window; the roll-up table has a fixed
+size; below a free-disk floor the writer records that it stopped, and on
+resuming records how many events it dropped.
 
 ## Development
 
-Requires Python 3.11 or newer.
+Requires Python 3.11 or newer and a clone with submodules:
 
 ```sh
+git clone --recurse-submodules https://github.com/python1/lurewall.git
+cd lurewall
 python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
 .venv/bin/pytest
 ```
 
+In an existing clone, run `git submodule update --init`. Lurewall runs from a
+source checkout (an editable install); a built wheel does not include the
+eureka signing code.
+
 CI runs the same lint and tests, plus a gitleaks secret scan, on every pull
 request. Changes reach `main` only through pull requests.
+
+## Third-party code
+
+`third_party/eureka_protocol` is a git submodule pinned to commit
+`7f29b208d1da54ebf5963e9b409f79d483979f74` (v0.3.0). Lurewall loads one file
+from it, `src/eureka_daemon/crypto.py`, which is AGPL-3.0-only, copyright Paul
+Charydczak. The loader checks that file's SHA-256 and refuses any other
+version.
 
 ## Security
 
