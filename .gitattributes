@@ -1,0 +1,2 @@
+# Byte-exact test fixtures: invalid UTF-8 and control characters on purpose.
+*.fixture binary

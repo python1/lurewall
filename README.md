@@ -35,8 +35,9 @@ combines them behind one gate and reports what a lab test shows.
 
 ## Status
 
-Built so far: the project scaffold and the signed event log. There is no
-detector, no canary and no blocking yet.
+Built so far: the project scaffold, the signed event log and the access-log
+reader. There is no detector, no canary and no blocking yet, and no command
+that runs the reader as a service.
 
 ## The signed log
 
@@ -73,6 +74,34 @@ Flood and failure behaviour: repeats of one event from one source are counted
 and written as one `rollup` entry per window; the roll-up table has a fixed
 size; below a free-disk floor the writer records that it stopped, and on
 resuming records how many events it dropped.
+
+## The log reader
+
+Lurewall never sits in the request path. It tails a JSON access log that nginx
+writes (the format is in `deploy/nginx/lurewall-log.conf`) and treats every
+field as untrusted data.
+
+- **No line is dropped silently.** A line becomes a record, or a signed
+  `parse_failure` event holding its offset, length and hash, never its text.
+  Past a per-minute budget, failures are counted in one `parse_failure_rollup`
+  event with a digest of the lines it covers.
+- **Hostile bytes.** nginx's `escape=json` leaves bytes above 126 alone, so
+  invalid UTF-8 can reach the log. The reader decodes it with replacement
+  characters and marks the record. This has been tested against lines built to
+  nginx's documented escaping, not yet against a real nginx.
+- **Rotation and restart.** The reader follows logrotate by inode, finishes the
+  old file before moving on, and resumes from a saved offset. If lines can no
+  longer be read (the rotated file is gone, or the file was cut short), it
+  writes an event saying so. Delivery is at-least-once: after a crash, lines
+  are read again rather than skipped.
+- **Lag and staleness.** The reader logs how far it is behind the access log.
+  Records more than 5 minutes old, or as far in the future, are marked stale so
+  that nothing enforces on a backlog.
+
+Known limits: a rotated file that was compressed or deleted before the reader
+caught up is a logged gap, so use logrotate's `delaycompress`. With
+`copytruncate`, a file cut and refilled past the reader's position between two
+polls is not noticed; use the default rename-and-reopen rotation.
 
 ## Development
 
