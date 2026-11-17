@@ -79,6 +79,19 @@ def _build_parser() -> argparse.ArgumentParser:
     which = rotate.add_mutually_exclusive_group(required=True)
     which.add_argument("--id", action="append", default=[], help="a canary id (repeatable)")
     which.add_argument("--all", action="store_true", help="replace every canary")
+
+    signals = commands.add_parser("signals", help="the per-site attack-signal config")
+    signal_commands = signals.add_subparsers(dest="signal_command", required=True)
+    check = signal_commands.add_parser(
+        "check",
+        help="check a signals config against the lab site's routes and the canary table",
+        description=(
+            "Exit status: 0 the config fits, 1 a decoy or a real site path would count "
+            "as an attack path, 2 the config or the canary state could not be read."
+        ),
+    )
+    check.add_argument("--config", required=True, type=Path, help="the signals config (TOML)")
+    check.add_argument("--state", required=True, type=Path, help=state_help)
     return parser
 
 
@@ -160,12 +173,38 @@ def _canary_command(args: argparse.Namespace) -> int:
         return EXIT_USAGE
 
 
+def _signals_command(args: argparse.Namespace) -> int:
+    from lurewall import canaries, labsite, sigconfig
+
+    try:
+        config = sigconfig.load(args.config)
+        canary_set = canaries.load_state(args.state)
+    except (sigconfig.SignalConfigError, canaries.CanaryError, OSError) as exc:
+        print(f"lurewall signals: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    routes = labsite.site_routes()
+    try:
+        sigconfig.check_against_site(config, canary_set, routes)
+    except sigconfig.SignalConfigError as exc:
+        print(f"lurewall signals: CHECK FAILED: {exc}", file=sys.stderr)
+        return EXIT_FAIL
+    rules = len(config.exact) + len(config.tree) + len(config.segment)
+    print(
+        f"signals config fits: {rules} attack-path rules checked against "
+        f"{len(canary_set.canaries)} decoys and {len(routes)} real routes; "
+        f"block threshold needs {config.distinct_attack_signals} distinct attack signals"
+    )
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "verify":
         return _verify(args)
     if args.command in ("lab-site", "canaries"):
         return _canary_command(args)
+    if args.command == "signals":
+        return _signals_command(args)
     return _key_command(args)
 
 

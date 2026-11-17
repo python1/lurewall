@@ -1,0 +1,83 @@
+# Lurewall signals config for the throwaway lab site.
+#
+# This file says exactly what counts as an attack signal on this site. It is
+# set per site: a path the site really serves must never be listed here, and
+# neither may a decoy path. `lurewall signals check` verifies both against the
+# site's routes and this installation's canaries, and Lurewall refuses to
+# classify anything under a config that fails that check.
+#
+# Nothing here is secret. No request body is ever read: none is logged.
+version = 1
+
+[site]
+# Every name and address the site is reached by. A request whose Referer names
+# any other host is cross-site and counts for nothing. Set these for the lab.
+hosts = ["lab.lurewall.test"]
+# Loads of these are "ordinary browsing" when they succeed.
+asset_prefixes = ["/assets/"]
+asset_extensions = ["css", "js", "png", "jpg", "svg", "ico", "woff2"]
+
+[attack_paths]
+# Matched on the URI as sent and on its normalized form (percent-decoded once,
+# slashes merged, dot segments resolved, lowercased). Write rules in lowercase.
+
+# The path equals the rule.
+exact = [
+    "/wp-login.php",
+    "/xmlrpc.php",
+    "/wp-config.php",
+    "/config.php",
+    "/phpinfo.php",
+    "/info.php",
+    "/server-status",
+    "/server-info",
+    "/.env.local",
+    "/.env.bak",
+    "/.env.production",
+    "/.htpasswd",
+    "/.htaccess",
+    "/.ds_store",
+    "/web.config",
+    "/id_rsa",
+    "/backup.sql",
+    "/dump.sql",
+    "/database.sql",
+]
+
+# The path is the rule, or anything under it.
+tree = [
+    "/admin",
+    "/administrator",
+    "/wp-admin",
+    "/wp-content",
+    "/wp-includes",
+    "/phpmyadmin",
+    "/pma",
+    "/cgi-bin",
+    "/actuator",
+    "/manager/html",
+    "/.aws",
+    "/.ssh",
+    "/.vscode",
+    "/vendor/phpunit",
+    "/solr",
+    "/jenkins",
+]
+
+# Any one segment of the path equals the rule, at any depth.
+segment = [".env", ".git", ".svn", ".hg"]
+
+[injection]
+# Pattern families matched in the path and query string.
+families = ["sqli", "traversal", "xss", "jndi", "command", "file"]
+
+[methods]
+# The lab site is static. These verbs have no use on it. GET, HEAD, POST and
+# OPTIONS can never be listed.
+abuse = ["PUT", "DELETE", "PATCH", "TRACE", "CONNECT", "PROPFIND", "MKCOL", "MOVE", "COPY"]
+
+[thresholds]
+window_minutes = 15
+# Never below 2: one signal, or speed alone, can never be enough.
+distinct_attack_signals = 2
+max_sources = 10000

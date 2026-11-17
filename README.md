@@ -36,8 +36,9 @@ combines them behind one gate and reports what a lab test shows.
 ## Status
 
 Built so far: the project scaffold, the signed event log, the access-log
-reader, and the canaries with their throwaway lab site. There is no scoring and
-no blocking yet, and no command that runs the reader as a service.
+reader, the canaries with their throwaway lab site, and the attack and behavior
+signals. There is no decision engine and no blocking yet, and no command that
+runs the reader as a service.
 
 ## The signed log
 
@@ -152,6 +153,58 @@ possible paths, so a determined attacker can enumerate them. A guessed path
 does not carry a request ID issued to the guesser, which is what the scoring
 (not built yet) will require. Many fetch tools strip comments, hidden elements
 and headers before a model sees the page, so those lures may never arrive.
+
+## Signals
+
+Each logged request is classified into signals of two classes. Only *attack*
+signals can ever count toward a block. *Behavior* signals (library user agent,
+missing Accept-Language, prose in a URL, steady timing, no asset loads,
+alphabetical order) are context in the log and count for nothing, so speed
+alone can never block anyone.
+
+```sh
+lurewall signals check --config deploy/signals/lab-site.toml --state /outside/any/repo/canaries.json
+```
+
+- **What counts is in a plain file.** `deploy/signals/lab-site.toml` lists the
+  attack paths (`/.env`, `/.git`, `/admin`, ...), the injection pattern
+  families and the abused verbs for the lab site. The file's schema is closed:
+  it has no key for a body signal, and the threshold cannot be set below 2.
+- **Never a decoy, never a real page.** The config is checked against the
+  canary table and the site's routes. A decoy path that matches an attack-path
+  rule in any spelling, or a real route that does, fails the check, and no
+  classifier can be built from a config that fails. A request nginx answers
+  with a decoy is also never treated as a sensitive-path probe at run time.
+- **Raw and normalized.** Every URI is matched as sent and in a normalized
+  form (percent-decoded once, slashes merged, dot segments resolved,
+  lowercased), so `/%2eenv`, `//.env` and `/.ENV` are all the `/.env` probe,
+  and they are one signal, not three.
+- **Path and query only.** Injection patterns look at the path and query
+  string. No request body is logged, so nothing reads one.
+- **Cross-site counts for nothing.** A request marked `Sec-Fetch-Site:
+  cross-site`, or with a Referer from another host, yields no attack signal
+  and no canary hit. It is logged as `cross_site`.
+- **Two distinct attack signals.** The attack threshold is two or more
+  distinct signals from one source inside 15 minutes. Repeats and spelling
+  variants of one probe are one signal.
+- **Sources.** A source is an IPv4 address or an IPv6 /64. The per-source
+  table has a fixed size; the source idle longest is dropped first and every
+  drop is logged.
+- **Shared addresses.** A source that also shows ordinary browsing in the
+  window (a successful asset load, or browser fetch metadata on a clean
+  request) is marked, so the engine will not double a block's TTL for it.
+
+Nothing in this part decides or blocks. It writes `attack_signal`,
+`attack_threshold_met`, `behavior_signal`, `cross_site` and
+`signal_state_evicted` events, none of which holds text from a request.
+
+Limits: a client can send `Sec-Fetch-Site: cross-site` itself and have its
+probes count for nothing; the filter protects third parties, it does not catch
+attackers. One request can carry two distinct signals (`/a/../.env` is a path
+probe and a traversal). A double-encoded path (`/%252eenv`) is decoded once, as
+nginx does, and is not matched. Fetch metadata is easy to fake, which only ever
+stops a TTL from doubling. At the table's size limit a flood of new sources
+pushes out older ones, attack state included.
 
 ## Development
 
