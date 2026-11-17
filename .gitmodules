@@ -1,0 +1,3 @@
+[submodule "third_party/eureka_protocol"]
+	path = third_party/eureka_protocol
+	url = https://github.com/python1/eureka_protocol.git
