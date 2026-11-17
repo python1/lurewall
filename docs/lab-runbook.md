@@ -53,8 +53,11 @@ grep -H 'firewall=1' /etc/pve/lxc/*.conf /etc/pve/qemu-server/*.conf 2>/dev/null
 
 Stop and send me the output if any of these is true:
 
-- `pct config 110` shows `unprivileged: 0`, `nesting=1` or a bind mount (`mp0:`).
-- 110.fw is missing, or allows inbound from anything but .177 and .152 on port 80.
+- `pct config 110` shows `unprivileged: 0` or a bind mount (`mp0:`). `nesting=1` is expected:
+  Debian 13's systemd needs it in an unprivileged CT, and so do the sandboxing options in
+  Lurewall's units.
+- 110.fw is missing (then the design doc's setup step 3 comes before Phase 1), or it
+  allows inbound from anything but .177 and .152 on port 80.
 - Any guest other than 110 has `firewall=1` (above all CT 102).
 - There is no snapshot to roll back to.
 
