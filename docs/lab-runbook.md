@@ -30,6 +30,43 @@ runner's kernel, so Phase 2 runs the real-nft tests inside CT 110 itself.
 
 ---
 
+## Before Phase 0: CT 110's firewall (done Nov 17, 2026)
+
+Done in this order, with CT 110 stopped, so it never ran unfiltered. All on the
+pve host shell.
+
+1. **Datacenter firewall, everything allowed.** Write `/etc/pve/firewall/cluster.fw`
+   with `enable: 1`, `policy_in: ACCEPT` and `policy_out: ACCEPT`. Guests without
+   their own `<vmid>.fw` stay unfiltered. Arm an automatic rollback first:
+   `systemd-run --on-active=5min --unit=lurewall-fw-rollback /bin/rm -f /etc/pve/firewall/cluster.fw`.
+   Then check the UI and CT 101, 102 and 104 before running
+   `systemctl stop lurewall-fw-rollback.timer`.
+2. **DNS off the LAN.** Run `pct set 110 --nameserver 1.1.1.1`. Without a
+   nameserver line, the CT inherits the host's resolver (the router), which
+   the firewall drops.
+3. **`/etc/pve/firewall/110.fw`.** Set `policy_in` and `policy_out` to DROP, and
+   `ndp: 0`, which leaves IPv6 with link-local only: no router advertisement,
+   no global address, no route. The rules: inbound TCP 80 from .177 and .152;
+   outbound `DROP -dest 192.168.1.0/24` first; then DNS, 80 and 443 to the
+   internet, for setup only.
+
+**After any `.fw` change, wait until `pve-firewall status` no longer says
+"pending" before you start or reboot CT 110.** Until then the old rules still
+apply.
+
+Leak tests and what they showed (curl exit codes: 28 timed out, so dropped;
+7 refused; 0 success):
+
+| Test | Run on | Expect |
+|---|---|---|
+| `curl -4 -m 5 -sk https://192.168.1.170:8006` | CT 110 | 28 |
+| `curl -4 -m 5 -s http://192.168.1.1/` | CT 110 | 28 |
+| `curl -6 -m 5 -sI https://deb.debian.org` | CT 110 | 7 (no IPv6 route) |
+| `curl -4 -m 10 -sI https://deb.debian.org` | CT 110 | 0 during setup; 28 after Phase 4 |
+| `nc -z -w 5 192.168.1.160 22` | Mac | 1 (dropped) |
+| `curl -m 5 http://192.168.1.160/`, nothing listening on 80 | Mac | 28, not 7: the CT's reset goes to the LAN and `OUT DROP` drops it |
+| `curl -m 5 http://192.168.1.160/`, a server on 80 | Mac | 0, with HTTP 200 |
+
 ## Phase 0: read-only checks
 
 Nothing in this phase changes anything. Send me the output of each step
@@ -117,8 +154,9 @@ curl -sI http://192.168.1.160/ | head -n 3
 
 ## Phase 1: open internet access for setup (pve host)
 
-The CT has no internet. Re-enable the four outbound rules that setup step 6 of
-the design doc disabled (a leading `|` disables a rule):
+On the first install the four setup rules are still active: skip this phase.
+Later, after Phase 4 has cut the internet, re-enable them this way. A leading
+`|` disables a rule.
 
 ```sh
 cp /etc/pve/firewall/110.fw /root/110.fw.before-pr8
@@ -127,6 +165,7 @@ sed -i -e 's/^|\(OUT ACCEPT -p udp -dport 53\)$/\1/' \
        -e 's/^|\(OUT ACCEPT -p tcp -dport 80\)$/\1/' \
        -e 's/^|\(OUT ACCEPT -p tcp -dport 443\)$/\1/' /etc/pve/firewall/110.fw
 pve-firewall compile >/dev/null && echo "rules OK"
+pve-firewall status        # repeat until it no longer says pending
 cat /etc/pve/firewall/110.fw
 ```
 
@@ -238,6 +277,7 @@ systemd-analyze verify /etc/systemd/system/lurewall.service \
 ```sh
 cp /root/110.fw.before-pr8 /etc/pve/firewall/110.fw
 pve-firewall compile >/dev/null && echo "rules OK"
+pve-firewall status        # repeat until it no longer says pending
 cat /etc/pve/firewall/110.fw      # the four OUT ACCEPT lines start with | again
 pct snapshot 110 lurewall-installed
 ```
