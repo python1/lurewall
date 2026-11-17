@@ -14,6 +14,7 @@ unless LUREWALL_REQUIRE_NGINX=1 says a skip would hide a missing dependency.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import http.client
 import os
 import random
@@ -421,8 +422,11 @@ def test_hostile_bytes_are_logged_and_every_line_is_accounted_for(lab, tmp_path)
 # -- signals, against what a real nginx logs ------------------------------------------
 
 
-def _classifier(lab):
+def _classifier(lab, *, https: bool = False):
     config = sigconfig.load(REPO / "deploy" / "signals" / "lab-site.toml")
+    if https:
+        # The same rules on an HTTPS site, where browsers send fetch metadata.
+        config = dataclasses.replace(config, https=True, hosts=frozenset({"lab"}))
     return signals.Classifier(config, lab.canary_set, labsite.site_routes())
 
 
@@ -451,6 +455,8 @@ def _request(
         (b"/Admin/", "path:/admin"),
         (b"//a%64min", "path:/admin"),
         (b"/WP-Login.php", "path:/wp-login.php"),
+        (b"/%252eenv", "path:*/.env"),
+        (b"/%2561dmin/", "path:/admin"),
         (b"/?id=1'%20OR%201=1", "injection:sqli"),
         (b"/?f=..%2f..%2fetc%2fpasswd", "injection:traversal"),
         (b"/?q=%3Cscript%3Ealert(1)%3C/script%3E", "injection:xss"),
@@ -483,7 +489,8 @@ def test_real_pages_assets_and_decoys_raise_no_attack_signal_on_a_real_nginx(lab
     _response, asset = _request(
         lab, b"GET", b"/assets/site.css", b"Sec-Fetch-Site: same-origin\r\n"
     )
-    result = classifier.classify(asset)
+    assert classifier.classify(asset).asset
+    result = _classifier(lab, https=True).classify(asset)
     assert result.asset and result.browser_metadata
     for canary in lab.canary_set.canaries:
         response, record = _request(lab, b"GET", canary.reference("0f" * 16).encode())
@@ -506,7 +513,7 @@ def test_a_decoy_reached_through_an_attack_spelling_is_what_nginx_serves(lab):
 
 
 def test_cross_site_headers_as_a_real_nginx_logs_them(lab):
-    classifier = _classifier(lab)
+    classifier = _classifier(lab, https=True)
     for extra, reason in (
         (b"Sec-Fetch-Site: cross-site\r\n", "sec_fetch_site"),
         (b"Referer: https://evil.example/frame.html\r\n", "referer"),
