@@ -1,0 +1,12 @@
+# Runs the sweeper every minute, on its own schedule. Enable this timer
+# whether or not lurewall.service is enabled.
+[Unit]
+Description=Lurewall sweeper timer
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

@@ -8,6 +8,7 @@ Plain TOML with a closed schema. Dry-run is on unless the file says
 from __future__ import annotations
 
 import ipaddress
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,9 @@ from pathlib import Path
 CONFIG_VERSION = 1
 MAX_CONFIG_BYTES = 256 * 1024
 MAX_RANGES = 20_000
+
+ADAPTERS = ("log-only", "nftables")
+_NFT_PATH_RE = re.compile(r"(?:/[A-Za-z0-9._-]{1,64}){1,8}", re.ASCII)
 
 Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 
@@ -36,6 +40,9 @@ class EngineConfig:
     max_hit_sources: int = 10_000
     max_issued_ids: int = 100_000
     max_ids_per_source: int = 256
+    # What enforces a block once dry-run is off. "log-only" blocks nothing.
+    adapter: str = "log-only"
+    nft_path: str = "/usr/sbin/nft"
 
     def __post_init__(self) -> None:
         # Held here as well as in the parser, so a config built in code is
@@ -55,6 +62,10 @@ class EngineConfig:
             value = getattr(self, name)
             if type(value) is not int or value < 1:
                 raise EngineConfigError(f"{name} must be a positive whole number")
+        if self.adapter not in ADAPTERS:
+            raise EngineConfigError(f"adapter must be one of: {', '.join(ADAPTERS)}")
+        if type(self.nft_path) is not str or _NFT_PATH_RE.fullmatch(self.nft_path) is None:
+            raise EngineConfigError("nft_path must be an absolute path to the nft binary")
         if self.max_ttl_ms < self.ttl_ms:
             raise EngineConfigError("the longest TTL cannot be shorter than the first TTL")
 
@@ -102,7 +113,9 @@ def parse(raw: bytes | str) -> EngineConfig:
         doc = tomllib.loads(raw)
     except (tomllib.TOMLDecodeError, RecursionError) as exc:
         raise EngineConfigError(f"engine config is not valid TOML: {exc}") from exc
-    unknown = sorted(set(doc) - {"version", "dry_run", "canary", "block", "sources", "limits"})
+    unknown = sorted(
+        set(doc) - {"version", "dry_run", "canary", "block", "sources", "limits", "enforcement"}
+    )
     if unknown:
         raise EngineConfigError(f"unknown top-level keys: {', '.join(unknown)}")
     if type(doc.get("version")) is not int or doc["version"] != CONFIG_VERSION:
@@ -115,6 +128,7 @@ def parse(raw: bytes | str) -> EngineConfig:
     block = _table(doc, "block", {"ttl_minutes", "max_ttl_minutes", "cap"})
     sources = _table(doc, "sources", {"allowlist", "log_only_ranges"})
     limits = _table(doc, "limits", {"max_hit_sources", "max_issued_ids", "max_ids_per_source"})
+    enforcement = _table(doc, "enforcement", {"adapter", "nft_path"})
     week = 7 * 24 * 60
     return EngineConfig(
         dry_run=dry_run,
@@ -128,6 +142,8 @@ def parse(raw: bytes | str) -> EngineConfig:
         max_hit_sources=_integer(limits, "limits", "max_hit_sources", 10_000, 1, 1_000_000),
         max_issued_ids=_integer(limits, "limits", "max_issued_ids", 100_000, 1, 10_000_000),
         max_ids_per_source=_integer(limits, "limits", "max_ids_per_source", 256, 1, 100_000),
+        adapter=enforcement.get("adapter", "log-only"),
+        nft_path=enforcement.get("nft_path", "/usr/sbin/nft"),
     )
 
 

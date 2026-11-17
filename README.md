@@ -37,9 +37,10 @@ combines them behind one gate and reports what a lab test shows.
 
 Built so far: the project scaffold, the signed event log, the access-log
 reader, the canaries with their throwaway lab site, the attack and behavior
-signals, and the decision engine. The engine runs in dry-run by default and the
-only adapter so far blocks nothing; the nftables adapter and a command that
-runs the reader as a service are not built yet.
+signals, the decision engine, the nftables adapter, the sweeper and the
+service command. Everything runs in dry-run by default. The adapter is tested
+against a real `nft` in CI, but no block has been checked on a live host yet,
+and the systemd units are untested reference files.
 
 ## The signed log
 
@@ -254,6 +255,43 @@ lurewall alerts clear --state /outside/any/repo/engine.json
 
 The config is `deploy/engine/lab.toml`. Counted hits, blocks, TTL history and
 the alert are saved to a state file (mode 0600, refused inside a repository).
+
+## Enforcement: nftables and the sweeper
+
+```sh
+lurewall run --access-log ... --reader-state ... --event-log ... --key ... \
+    --canaries ... --signals ... --engine ... --engine-state ...
+lurewall sweep --event-log /outside/any/repo/sweeper.log --key ...
+```
+
+Nothing is enforced unless the engine config has both `dry_run = false` and
+`adapter = "nftables"`. The shipped config has neither.
+
+- **Expiry stored with each entry, twice.** A block is one element in an
+  nftables set matched by a drop rule. It carries nftables' own timeout, so
+  the kernel removes it with Lurewall stopped, and its absolute expiry time in
+  the element's comment, so anything can tell when it is due. The same time is
+  in Lurewall's state file.
+- **Reconcile on startup.** `lurewall run` compares its state file with the
+  live sets. It removes entries that are expired, unknown or carry a different
+  expiry, and puts back unexpired blocks that are missing (sets are lost on
+  reboot) with the time they have left. In dry-run it touches nothing.
+- **The sweeper is separate.** `lurewall sweep` is run by its own systemd
+  timer (`deploy/systemd/`), not by the service. It reads expiry times from
+  the live entries only, so it works with the service stopped and its state
+  lost. It removes what is past due and anything that cannot show when it is
+  due. It writes to its own signed log, because the service's log has one
+  writer. A run with nothing to remove writes nothing.
+- **Stale events.** A backlog read after downtime is logged and enforces
+  nothing.
+- **Failures.** If `nft` fails, the decision is still logged, the failure is
+  logged, and the block is retried. Nothing from `nft`'s output is logged.
+- **Only addresses reach `nft`.** Every command is built from fixed words and
+  addresses that have been parsed and written back out. The adapter refuses
+  loopback, unspecified and multicast addresses.
+
+The nftables adapter is for the isolated lab container and direct traffic. A
+site behind Cloudflare must not use it: the origin sees Cloudflare's addresses.
 
 Limits: issued request IDs are kept in memory only, so after a restart a hit on
 a page served before it is unbound and does not count. Pages read from one

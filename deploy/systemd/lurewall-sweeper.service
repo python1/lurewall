@@ -1,0 +1,27 @@
+# Lurewall sweeper: removes nftables entries that are past due.
+#
+# Deliberately not tied to lurewall.service: no Requires=, no PartOf=, no
+# After=. It must run, and blocks must end, while the main service is stopped.
+# It reads expiry times from the live entries and needs none of the service's
+# state. It writes to its own signed log.
+[Unit]
+Description=Lurewall sweeper: remove expired blocks
+
+[Service]
+Type=oneshot
+User=lurewall
+Group=lurewall
+ExecStart=/opt/lurewall/.venv/bin/lurewall sweep \
+    --event-log /var/lib/lurewall/sweeper.log \
+    --key /var/lib/lurewall/keys/lurewall.key
+
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+ReadWritePaths=/var/lib/lurewall
+UMask=0077

@@ -46,6 +46,7 @@ from lurewall.canaries import refuse_git_work_tree
 from lurewall.collector import Observation
 from lurewall.engineconfig import EngineConfig, Network
 from lurewall.logreader import Sink
+from lurewall.nft import ReconcileReport
 from lurewall.sigconfig import MIN_DISTINCT_ATTACK_SIGNALS
 from lurewall.sources import SignalTracker
 
@@ -73,15 +74,20 @@ class Adapter(Protocol):
 
     def unblock(self, source: str) -> None: ...
 
+    def reconcile(self, wanted: dict[str, int]) -> ReconcileReport: ...
+
 
 class LogOnlyAdapter:
-    """Blocks nothing. The only adapter until the nftables one exists."""
+    """Blocks nothing. The default adapter."""
 
     def block(self, source: str, expiry_ms: int) -> None:
         return None
 
     def unblock(self, source: str) -> None:
         return None
+
+    def reconcile(self, wanted: dict[str, int]) -> ReconcileReport:
+        return ReconcileReport()
 
 
 @dataclass(frozen=True)
@@ -154,6 +160,8 @@ class Engine:
         self._alert_raised: int | None = None
         self._dirty = False
         self._last_save = 0
+        # Blocks decided but not yet in place because the adapter failed.
+        self._pending: set[str] = set()
         if self._state_path is not None:
             self._load()
 
@@ -194,10 +202,71 @@ class Engine:
         return decision
 
     def tick(self, now_ms: int | None = None) -> None:
-        """Expire blocks that are due and save state. Safe to call often."""
+        """Expire blocks that are due, retry failed ones, save state. Safe to call often."""
         now = self._clock() if now_ms is None else now_ms
         self._expire(now)
+        for source in sorted(self._pending):
+            block = self._blocks.get(source)
+            if block is None or not block.enforced:
+                self._pending.discard(source)
+            elif self._apply(source, block.expiry, retry=True):
+                self._sink.append("block_applied", source, {"expiry_ms": block.expiry})
         self._save(now)
+
+    def start(self) -> ReconcileReport | None:
+        """Reconcile the adapter with saved state. Call once, before any record.
+
+        Blocks that expired while the engine was down are expired first. The
+        adapter then removes live entries that are expired or unknown and
+        puts back unexpired blocks that are missing. In dry-run nothing is
+        touched and nothing is reconciled.
+        """
+        now = self._clock()
+        self._expire(now)
+        if self.config.dry_run:
+            return None
+        wanted = {source: block.expiry for source, block in self._blocks.items() if block.enforced}
+        try:
+            report = self._adapter.reconcile(wanted)
+        except Exception as exc:
+            self._adapter_failed("reconcile", None, exc)
+            self._pending.update(wanted)
+            return None
+        for element, reason in report.removed:
+            self._sink.append("enforcement_removed", None, {"element": element, "reason": reason})
+        for source in report.restored:
+            self._sink.append("block_restored", source, {"expiry_ms": wanted[source]})
+        self._sink.append(
+            "reconcile",
+            None,
+            {
+                "kept": report.kept,
+                "removed": len(report.removed),
+                "restored": len(report.restored),
+            },
+        )
+        return report
+
+    def _adapter_failed(self, action: str, source: str | None, exc: Exception) -> None:
+        # The exception's type only: its text can quote what nft was given.
+        self._sink.append(
+            "enforcement_failed",
+            source,
+            {"action": action, "error": type(exc).__name__},
+            rollup_key=action,
+        )
+
+    def _apply(self, source: str, expiry: int, *, retry: bool = False) -> bool:
+        """Hand a block to the adapter. A failure is logged and retried on tick."""
+        try:
+            self._adapter.block(source, expiry)
+        except Exception as exc:
+            if not retry or source not in self._pending:
+                self._adapter_failed("block", source, exc)
+            self._pending.add(source)
+            return False
+        self._pending.discard(source)
+        return True
 
     def close(self) -> None:
         self._save(self._clock(), force=True)
@@ -377,8 +446,8 @@ class Engine:
             "normal_browsing": view.normal_browsing,
         }
         if enforced:
-            self._adapter.block(source, expiry)
-            self._sink.append("block", source, detail)
+            # The decision is logged whether or not the adapter managed it.
+            self._sink.append("block", source, {**detail, "applied": self._apply(source, expiry)})
         else:
             self._sink.append("would_block", source, {**detail, "reason": "dry_run"})
         self._blocks[source] = _Block(start=now, expiry=expiry, ttl=ttl, enforced=enforced)
@@ -408,8 +477,13 @@ class Engine:
         due = [source for source, block in self._blocks.items() if block.expiry <= now]
         for source in due:
             block = self._blocks.pop(source)
+            self._pending.discard(source)
             if block.enforced:
-                self._adapter.unblock(source)
+                try:
+                    self._adapter.unblock(source)
+                except Exception as exc:
+                    # The entry's own timeout and the sweeper still remove it.
+                    self._adapter_failed("unblock", source, exc)
             self._sink.append(
                 "block_expired",
                 source,
