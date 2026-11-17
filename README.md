@@ -36,9 +36,10 @@ combines them behind one gate and reports what a lab test shows.
 ## Status
 
 Built so far: the project scaffold, the signed event log, the access-log
-reader, the canaries with their throwaway lab site, and the attack and behavior
-signals. There is no decision engine and no blocking yet, and no command that
-runs the reader as a service.
+reader, the canaries with their throwaway lab site, the attack and behavior
+signals, and the decision engine. The engine runs in dry-run by default and the
+only adapter so far blocks nothing; the nftables adapter and a command that
+runs the reader as a service are not built yet.
 
 ## The signed log
 
@@ -212,6 +213,54 @@ and if cross-site probes counted, any page with two image tags could get that
 source blocked. The filter protects third parties; it does not catch attackers.
 Fetch metadata is easy to fake, which only ever stops a TTL from doubling. At the table's size limit a flood of new sources
 pushes out older ones, attack state included.
+
+## The decision engine
+
+A small, deterministic rule set over per-source state. No ML: every decision
+can be explained from the log.
+
+| Counted canary hit in the last 7 days | Attack threshold met | Outcome |
+|---|---|---|
+| no | no | nothing |
+| yes | no | logged as a content reader; no block |
+| no | yes | logged as an attack with no canary hit; no block in v1 |
+| yes | yes | block with a TTL |
+
+- **Request-ID binding.** A canary hit counts only when the request ID it
+  carries was issued to the same source, on a page nginx served it in the last
+  24 hours. An ID issued to another source is logged as `canary_relayed` and
+  counts for nobody. A missing, made-up or guessed ID is `canary_unbound`.
+- **Sticky hit.** A counted hit stays on its source for 7 days, so waiting out
+  the 15-minute attack window does not help.
+- **Before any block.** Sources inside the configured provider ranges are
+  log-only, matched by address and never by user agent. The allowlist is
+  checked next and logs `would_block`. Nothing older than 5 minutes is acted on.
+- **Dry-run is the default.** It logs `would_block` and enforces nothing. It
+  stays on until `dry_run = false` is written in the config.
+- **TTL.** 24 hours first, doubling on each repeat up to 7 days. It does not
+  double when the source also showed ordinary browsing. A new block needs
+  fresh evidence: the signals that caused a block are spent.
+- **Cap.** At most 1,000 active blocks. At the cap new blocks are refused, a
+  `cap_reached` event is logged, an error-level line goes to the journal, and
+  `lurewall status` shows a warning (and exits 1) until `lurewall alerts clear`.
+  No block is evicted early.
+- **Bounded.** The tables of issued IDs and counted hits have fixed sizes, and
+  one source can only rotate out its own IDs.
+
+```sh
+lurewall status --state /outside/any/repo/engine.json
+lurewall alerts clear --state /outside/any/repo/engine.json
+```
+
+The config is `deploy/engine/lab.toml`. Counted hits, blocks, TTL history and
+the alert are saved to a state file (mode 0600, refused inside a repository).
+
+Limits: issued request IDs are kept in memory only, so after a restart a hit on
+a page served before it is unbound and does not count. Pages read from one
+address and probes sent from another are not blocked. A stale canary hit (from
+a backlog) is logged but not counted. Cross-site probes never count, so a
+client that forges a Referer hides its probes; the engine logs that it saw
+them (`content_reader_cross_site_probes_not_counted`).
 
 ## Development
 

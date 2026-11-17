@@ -188,13 +188,18 @@ class SignalTracker:
             behavior=tuple(self._behavior(state, floor)),
         )
 
-    def forget_attack(self, source: str) -> None:
-        """Drop a source's attack signals. Called when a block starts and ends,
-        so a later block needs fresh evidence, not the signals already acted on."""
+    def forget_attack(self, source: str, up_to_ms: int | None = None) -> None:
+        """Drop a source's attack signals, all of them or those seen up to a time.
+
+        Called when a block starts and when it ends, so a later block needs
+        fresh evidence, not the signals already acted on.
+        """
         state = self._sources.get(source)
-        if state is not None:
-            state.attack.clear()
-            state.attack_requests.clear()
+        if state is None:
+            return
+        for table in (state.attack, state.attack_requests):
+            for key in [k for k, seen in table.items() if up_to_ms is None or seen <= up_to_ms]:
+                del table[key]
 
     # -- internals ---------------------------------------------------------------
 

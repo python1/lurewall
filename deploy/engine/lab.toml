@@ -1,0 +1,42 @@
+# Lurewall decision engine config for the lab.
+#
+# The engine blocks a source only when it holds a counted canary hit and has
+# met the attack threshold. Everything here is a starting point to be tuned
+# from test data. Nothing here is secret, but the allowlist names your own
+# addresses: keep a filled-in copy outside the repository if you prefer.
+version = 1
+
+# Dry-run logs "would block" and enforces nothing. It is the default, and it
+# stays on until test results justify enforcing.
+dry_run = true
+
+[canary]
+# A counted canary hit stays on its source this long, so waiting out the
+# attack window does not help.
+sticky_days = 7
+# A hit counts only when its request ID was issued to the same source, on a
+# page served no longer ago than this.
+id_ttl_hours = 24
+
+[block]
+# First block. The lab runbook uses 5 minutes for its test cases.
+ttl_minutes = 1440
+# A repeat block doubles the last TTL, up to this. It does not double when the
+# source also showed ordinary browsing: that suggests a shared address.
+max_ttl_minutes = 10080
+# At the cap new blocks are refused, a cap_reached event is logged and an
+# alert stands in `lurewall status` until cleared. No block is evicted early.
+cap = 1000
+
+[sources]
+# Checked before any block: these are logged as "would block", never blocked.
+# Addresses or CIDR ranges.
+allowlist = []
+# Address ranges AI providers publish for their own fetchers: logged, never
+# blocked. Matched by address, never by user agent.
+log_only_ranges = []
+
+[limits]
+max_hit_sources = 10000
+max_issued_ids = 100000
+max_ids_per_source = 256
