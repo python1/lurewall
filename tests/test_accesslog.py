@@ -175,7 +175,7 @@ def test_a_failure_carries_no_line_content():
 
 
 def test_random_bytes_never_raise_and_never_vanish():
-    rng = random.Random(20261116)  # noqa: S311 - a fixed seed for a repeatable fuzz, not a secret
+    rng = random.Random(20261116)  # a fixed seed: a repeatable fuzz
     good = line()[:-1]
     for _ in range(3000):
         choice = rng.random()

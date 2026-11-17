@@ -50,6 +50,35 @@ def _build_parser() -> argparse.ArgumentParser:
 
     pubkey = commands.add_parser("pubkey", help="print the public key of a signing key file")
     pubkey.add_argument("--key", required=True, type=Path, help="the key file")
+
+    state_help = "this installation's canary state file (outside any git repository)"
+    site = commands.add_parser("lab-site", help="the throwaway lab site")
+    site_commands = site.add_subparsers(dest="site_command", required=True)
+    build = site_commands.add_parser(
+        "build",
+        help="build the lab site and its nginx config; creates the canary set on first use",
+        description="Fails if any decoy path collides with a real site path.",
+    )
+    build.add_argument("--state", required=True, type=Path, help=state_help)
+    build.add_argument("--out", required=True, type=Path, help="output directory (outside git)")
+    build.add_argument(
+        "--deploy-root",
+        help="where the output will live on the web server, if not the output directory",
+    )
+    build.add_argument("--listen", default="80", help="nginx listen value (default: 80)")
+
+    canaries = commands.add_parser("canaries", help="this installation's canaries")
+    canary_commands = canaries.add_subparsers(dest="canary_command", required=True)
+    listing = canary_commands.add_parser("list", help="print the lookup table")
+    listing.add_argument("--state", required=True, type=Path, help=state_help)
+    rotate = canary_commands.add_parser(
+        "rotate",
+        help="replace canaries after a suspected leak (never on a schedule), then rebuild",
+    )
+    rotate.add_argument("--state", required=True, type=Path, help=state_help)
+    which = rotate.add_mutually_exclusive_group(required=True)
+    which.add_argument("--id", action="append", default=[], help="a canary id (repeatable)")
+    which.add_argument("--all", action="store_true", help="replace every canary")
     return parser
 
 
@@ -89,10 +118,54 @@ def _key_command(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _canary_command(args: argparse.Namespace) -> int:
+    from lurewall import canaries, labsite
+
+    name = f"lurewall {args.command}"
+    try:
+        if args.command == "lab-site":
+            if args.state.exists():
+                canary_set = canaries.load_state(args.state)
+            else:
+                canary_set = canaries.generate(labsite.site_routes())
+                canaries.save_state(canary_set, args.state)
+                print(f"generated a new canary set: {args.state}")
+            result = labsite.build(
+                canary_set, args.out, deploy_root=args.deploy_root, listen=args.listen
+            )
+            counts = canary_set.lure_counts()
+            print(f"site built: {result.web_root}")
+            print(f"nginx config: {result.nginx_conf}")
+            print(
+                f"canaries: {len(canary_set.canaries)} "
+                f"({counts['instruction']} instruction, {counts['bait']} bait); "
+                f"checked against {len(result.routes)} real routes, no collisions"
+            )
+            return EXIT_OK
+        canary_set = canaries.load_state(args.state)
+        if args.canary_command == "rotate":
+            ids = list(canaries.PLACEMENTS) if args.all else args.id
+            canary_set = canaries.rotate(canary_set, ids, labsite.site_routes())
+            canaries.save_state(canary_set, args.state)
+            print(f"rotated {len(set(ids))} canaries. Rebuild the site to put them in place.")
+            return EXIT_OK
+        for canary in canary_set.canaries:
+            print(f"{canary.id}\t{canary.lure}\t{canary.path}\t{canary.param}")
+        return EXIT_OK
+    except canaries.CollisionError as exc:
+        print(f"{name}: BUILD FAILED: {exc}", file=sys.stderr)
+        return EXIT_FAIL
+    except (canaries.CanaryError, OSError) as exc:
+        print(f"{name}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "verify":
         return _verify(args)
+    if args.command in ("lab-site", "canaries"):
+        return _canary_command(args)
     return _key_command(args)
 
 

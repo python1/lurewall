@@ -49,4 +49,5 @@ select = ["E", "F", "W", "I", "B", "UP", "S", "C4", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 # assert is how pytest tests are written.
 # Hostile-string fixtures hold confusable characters on purpose.
-"tests/**" = ["S101", "RUF001"]
+# Seeded random.Random makes generator tests repeatable; it guards nothing.
+"tests/**" = ["S101", "RUF001", "S311"]

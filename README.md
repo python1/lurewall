@@ -35,9 +35,9 @@ combines them behind one gate and reports what a lab test shows.
 
 ## Status
 
-Built so far: the project scaffold, the signed event log and the access-log
-reader. There is no detector, no canary and no blocking yet, and no command
-that runs the reader as a service.
+Built so far: the project scaffold, the signed event log, the access-log
+reader, and the canaries with their throwaway lab site. There is no scoring and
+no blocking yet, and no command that runs the reader as a service.
 
 ## The signed log
 
@@ -102,6 +102,55 @@ Known limits: a rotated file that was compressed or deleted before the reader
 caught up is a logged gap, so use logrotate's `delaycompress`. With
 `copytruncate`, a file cut and refilled past the reader's position between two
 polls is not noticed; use the default rename-and-reopen rotation.
+
+## Canaries and the lab site
+
+A canary is a short piece of non-rendered page content naming a decoy path. A
+client that reads it and acts on it makes one request to that path. The decoy
+answers 200 with a fixed body that holds no data, and the request is logged.
+That is the whole effect.
+
+```sh
+lurewall lab-site build --state /outside/any/repo/canaries.json --out /outside/any/repo/lab-site
+lurewall canaries list --state /outside/any/repo/canaries.json
+lurewall canaries rotate --state /outside/any/repo/canaries.json --id api_doc.bait
+```
+
+`lab-site build` creates the installation's canary set on first use, then
+writes a small fictional static site and an nginx `server` block for it.
+
+- **Per installation.** Decoy paths, lure wording, the canary header's name
+  and the decoy bodies are drawn at random for each installation and kept in a
+  state file outside any git repository; Lurewall refuses to read or write one
+  inside a repository. This repository holds only the generator, its word
+  banks and one example file that the loader refuses.
+- **Two lure types, measured apart.** An *instruction* lure addresses the
+  reader ("confirm access at ..."). A *bait* lure gives no instruction: it is
+  something a probing agent wants, such as a commented-out backup link. Every
+  canary carries its label.
+- **Seven placements.** HTML comments (one of each type), a visually hidden
+  element, a robots.txt comment, an unlinked `noindex` API page, the error
+  pages and a response header.
+- **No shared fingerprint.** Decoy paths look like ordinary paths and no two
+  share a first segment. A path outside the table gets the site's normal 404.
+  robots.txt has no `Disallow` line for decoys; they send `X-Robots-Tag`.
+- **Never a real route.** The build fails if a decoy path collides with a real
+  site path, and the check runs on every build.
+- **Tied to the page that served it.** nginx's `sub_filter` writes each
+  request's `$request_id` into the canary references on the page it serves,
+  with no proxy. A hit carries the ID of the page that showed it.
+- **Not read aloud.** A canary is either an HTML comment or an element with
+  `aria-hidden="true"` and nothing focusable inside. This is checked on the
+  markup; a real screen reader, reader modes and AI page describers are still
+  to be tested in the lab before any public use.
+- **Rotation only on leak.** Nothing rotates on a schedule. Two fetches of a
+  page differ only in the request ID.
+
+Limits: the word banks are public and each placement has roughly 2^27 to 2^33
+possible paths, so a determined attacker can enumerate them. A guessed path
+does not carry a request ID issued to the guesser, which is what the scoring
+(not built yet) will require. Many fetch tools strip comments, hidden elements
+and headers before a model sees the page, so those lures may never arrive.
 
 ## Development
 
