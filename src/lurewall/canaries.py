@@ -408,6 +408,11 @@ def _validate_quiet(canary: Canary, bad) -> None:
     segments = canary.path.strip("/").split("/")
     if any(segment in RESERVED_SEGMENTS or segment.startswith(".") for segment in segments):
         raise bad("decoy path contains a reserved (attack-path) name")
+    named = [w for w in re.findall(r"[a-z]+", canary.path.rsplit("-", 1)[0]) if len(w) > 1]
+    if set(named) & IMPERATIVE_WORDS:
+        raise bad("a quiet decoy path may not hold a word that gives an order")
+    if len(set(named)) != len(named):
+        raise bad("a quiet decoy path repeats a word")
     if canary.param or canary.body or canary.content_type or canary.form != "plain":
         raise bad("a quiet canary has no query key, body or content type, and plain text")
     if _TEXT_RE.fullmatch(canary.text) is None or "--" in canary.text:
@@ -494,12 +499,39 @@ def _token(rng: Any) -> str:
     return f"{rng.getrandbits(32):08x}"
 
 
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z]+", text.lower()))
+
+
+def _quiet_directory_ok(directory: str) -> bool:
+    """A quiet path's first folder is a plain word: never one that gives an order."""
+    return not _words(directory) & IMPERATIVE_WORDS
+
+
 def _quiet_path(canary_id: str, directory: str, rng: Any) -> str:
+    # The word after the folder never repeats it: no "/backup-old-backup-...".
     if canary_id == "footer_comment.quiet":
-        return f"/{directory}/{rng.choice(bank.QUIET_FOOTER_STEMS)}-{_token(rng)}/"
-    if canary_id == "robots_disallow.quiet":
-        return f"/{directory}-{rng.choice(bank.QUIET_ROBOTS_WORDS)}-{_token(rng)}/"
-    return f"/{directory}/{rng.choice(bank.QUIET_SECURITY_STEMS)}-{_token(rng)}/"
+        bank_words, joiner = bank.QUIET_FOOTER_STEMS, "/"
+    elif canary_id == "robots_disallow.quiet":
+        bank_words, joiner = bank.QUIET_ROBOTS_WORDS, "-"
+    else:
+        bank_words, joiner = bank.QUIET_SECURITY_STEMS, "/"
+    fresh = [word for word in bank_words if not _words(word) & _words(directory)]
+    return f"/{directory}{joiner}{rng.choice(fresh)}-{_token(rng)}/"
+
+
+def _assign_directories(ids: Iterable[str], directories: list[str], rng: Any) -> dict[str, str]:
+    """One unused first folder per canary; a quiet canary only gets a plain word."""
+    pool = list(directories)
+    chosen: dict[str, str] = {}
+    # Quiet canaries pick first: they have the narrower list.
+    for canary_id in sorted(ids, key=lambda i: i not in QUIET_PLACEMENTS):
+        options = [d for d in pool if canary_id not in QUIET_PLACEMENTS or _quiet_directory_ok(d)]
+        if not options:
+            raise CanaryError("no unused top-level names left for the canaries")
+        chosen[canary_id] = rng.choice(options)
+        pool.remove(chosen[canary_id])
+    return chosen
 
 
 def path_space(canary_id: str) -> int:
@@ -607,7 +639,18 @@ def _free_directories(real_paths: Iterable[str], taken: Iterable[str]) -> list[s
     """First segments a new decoy may use: not a real top-level name, not already a decoy's."""
     used = {collision_key(path).split("/")[1] for path in real_paths if collision_key(path) != "/"}
     used.update(taken)
-    return [name for name in bank.DIRS if name not in used and name not in RESERVED_SEGMENTS]
+    # Canary A's first segment is "<folder>-<word>-<token>": its folder is taken too.
+    return [
+        name
+        for name in bank.DIRS
+        if name not in used
+        and name not in RESERVED_SEGMENTS
+        and not any(t.startswith(name + "-") and _ends_in_token(t) for t in used)
+    ]
+
+
+def _ends_in_token(segment: str) -> bool:
+    return re.fullmatch(r".+-[0-9a-f]{8,16}", segment) is not None
 
 
 def generate(
@@ -628,10 +671,9 @@ def generate(
     directories = _free_directories(real, ())
     if len(directories) < len(placements):
         raise CanaryError("the site uses too many of the generator's top-level names")
-    chosen = rng.sample(directories, len(placements))
+    chosen = _assign_directories(placements, directories, rng)
     canaries = tuple(
-        _make_canary(canary_id, directory, real, rng)
-        for canary_id, directory in zip(placements, chosen, strict=True)
+        _make_canary(canary_id, chosen[canary_id], real, rng) for canary_id in placements
     )
     canary_set = CanarySet(
         version=STATE_VERSION,
@@ -656,10 +698,9 @@ def add_quiet(canary_set: CanarySet, real_paths: Iterable[str], *, rng: Any = No
     directories = _free_directories(real, kept_firsts)
     if len(directories) < len(QUIET_PLACEMENTS):
         raise CanaryError("no unused top-level names left for the quiet canaries")
-    chosen = rng.sample(directories, len(QUIET_PLACEMENTS))
+    chosen = _assign_directories(QUIET_PLACEMENTS, directories, rng)
     quiet = tuple(
-        _make_canary(canary_id, directory, real, rng)
-        for canary_id, directory in zip(QUIET_PLACEMENTS, chosen, strict=True)
+        _make_canary(canary_id, chosen[canary_id], real, rng) for canary_id in QUIET_PLACEMENTS
     )
     upgraded = replace(canary_set, canaries=canary_set.canaries + quiet)
     validate(upgraded)
@@ -681,9 +722,9 @@ def rotate(
     directories = _free_directories(real, kept_firsts)
     if len(directories) < len(wanted):
         raise CanaryError("no unused top-level names left to rotate into")
-    fresh = iter(rng.sample(directories, len(wanted)))
+    fresh = _assign_directories(sorted(wanted), directories, rng)
     canaries = tuple(
-        _make_canary(c.id, next(fresh), real, rng) if c.id in wanted else c
+        _make_canary(c.id, fresh[c.id], real, rng) if c.id in wanted else c
         for c in canary_set.canaries
     )
     rotated = replace(canary_set, canaries=canaries)

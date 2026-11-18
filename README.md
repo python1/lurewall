@@ -107,12 +107,22 @@ are tracked in issue #14.
 - **An ordinary 404.** A quiet decoy has no nginx location. A request for one
   gets the site's normal 404, byte for byte, and every 404 on the site now
   sends `X-Robots-Tag: noindex`, so a trap's 404 is identical to any other.
-- **Bound by the page that carried it.** A quiet reference holds no request ID.
-  A hit counts only if the same source was served the carrying page in the
-  last 24 hours (B: any content page; A: robots.txt; C: security.txt). That
-  page must have been fetched by GET or HEAD and not cross-site. Only GET and
-  HEAD to the decoy count. Case, a trailing slash, an encoded slash or a query
-  string does not change the match.
+- **A hit counts only after the same address loaded the page.** A quiet
+  reference holds no request ID, so the page binds it instead. A v2 hit counts
+  only if the same address (an IPv4 address or an IPv6 /64) loaded the page
+  that carries that canary within the last 24 hours. For B that is any
+  content page, for A robots.txt, and for C security.txt. The page load must
+  be a GET or HEAD that is not cross-site. **A guessed or shared path doesn't
+  count:** a request from an address that never loaded the page is logged as
+  `canary_unbound` (`not_served`, or `expired_served` after 24 hours) and
+  counts for nobody. The bindings are kept in memory only, so after a restart
+  an address must load the page again. Only GET and HEAD to the decoy count.
+  Case, a trailing slash, an encoded slash or a query string does not change
+  the match.
+- **Plain-word paths.** A quiet path is a folder from the same list of
+  ordinary site words as the v1 decoys (never one that gives an order, such
+  as `verify`), then a word, then the per-install token, with no word
+  repeated.
 - **Labelled in the log.** Every `canary_hit` holds `family` (`v1-imperative`
   or `v2-quiet`) and `signal`; `block` and `would_block` hold `canary_family`
   and `canary_signal`. `lab results` reports hits per family and signal, and

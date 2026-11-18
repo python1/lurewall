@@ -710,3 +710,34 @@ def test_rotating_a_quiet_canary_changes_only_its_token_and_place():
     assert before["robots_disallow.quiet"].path != after["robots_disallow.quiet"].path
     assert before["footer_comment.quiet"] == after["footer_comment.quiet"]
     assert v1(canary_set) == v1(rotated)
+
+
+def test_a_quiet_path_is_built_from_plain_words_and_a_token():
+    for seed in SEEDS:
+        canary_set = make(seed)
+        firsts = []
+        for canary in quiet(canary_set).values():
+            words_part, token = canary.path.strip("/").rsplit("-", 1)
+            assert re.fullmatch(r"[0-9a-f]{8}", token)
+            if canary.id == "robots_disallow.quiet":
+                folder = next(d for d in bank.DIRS if words_part.startswith(d + "-"))
+                assert words_part[len(folder) + 1 :] in bank.QUIET_ROBOTS_WORDS
+            else:
+                folder, stem = words_part.split("/")
+                stems = bank.QUIET_FOOTER_STEMS + bank.QUIET_SECURITY_STEMS
+                assert stem in stems
+            assert folder in bank.DIRS  # a real word from the list, never random letters
+            words = re.findall(r"[a-z]+", words_part)
+            assert not set(words) & canaries.IMPERATIVE_WORDS, canary.path
+            assert len(set(words)) == len(words), canary.path  # no "/backup-old-backup-"
+            firsts.append(folder)
+        v1_firsts = {c.path.split("/")[1] for c in v1(canary_set)}
+        assert len(set(firsts)) == 3 and not set(firsts) & v1_firsts
+
+
+def test_a_quiet_path_with_an_order_or_a_repeated_word_is_refused():
+    canary_set = make()
+    for path in ("/verify/settings-0123abcd/", "/backup-old-backup-0123abcd/"):
+        bad = with_canary(canary_set, "robots_disallow.quiet", path=path)
+        with pytest.raises(CanaryError, match=r"order|repeats"):
+            canaries.validate(bad)
