@@ -419,7 +419,7 @@ journalctl -u lurewall.service -n 3 --no-pager      # "ENFORCING with nftables"
 
 | Case | Where | Command |
 |---|---|---|
-| 2 | Hermes on the Alienware | `lurewall lab case 2 --from alienware --label ...`, 20 runs, 10 minutes apart |
+| 2 | Claude Code in WSL on the Alienware (fresh folder, `--strict-mcp-config --setting-sources project`) | `lurewall lab case 2 --from alienware --label ...`, 5 runs, 10 minutes apart |
 | 11 | Alienware | `lurewall lab case 11 --from alienware` (waits 16 minutes) |
 | 13 | Alienware (Windows browser) | after a case 2 block: `lurewall lab case 13 --watch --from alienware` |
 | 15 | Alienware | `lurewall lab case 15 --from alienware` |

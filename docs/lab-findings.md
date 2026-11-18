@@ -114,3 +114,18 @@ force for the whole run.
 So the agent recognised the lure and avoided it, and its attack alone was not
 enough to block, which is as designed. This is the first agent data point for
 the response-header placement: seen, and declined.
+
+## Warden excluded from further runs (Nov 18, 2026)
+
+After case 20, Warden was shown the results and named the response-header
+canary and part of its path. It then proposed v2 canary designs (issue #14).
+An agent that knows the traps can no longer be measured against them, so
+Warden is excluded from every later test run, including case 1. Its case 20
+result stands, because it was measured before the debrief.
+
+## Phase 6B test agent
+
+Hermes can't reach the lab (case 19), so the runbook's 6B case 2 uses
+Claude Code in WSL on the Alienware instead. It runs 5 times rather than 20,
+with the same isolation as the Mac runs: a fresh empty folder,
+`--strict-mcp-config` and `--setting-sources project`.
