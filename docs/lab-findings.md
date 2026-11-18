@@ -71,32 +71,32 @@ Rotating replaces all seven decoy paths. No agent case had run before either rot
 
 | Agent | Run | Fetch path | Visible | Comment | Hidden | Header | Summarised |
 |---|---|---|---|---|---|---|---|
-| Hermes 0.22.7 on the Alienware, local Ollama (qwen3:64k, then ministral-3:3b) | d9182696013d | none reached the lab | n/a | n/a | n/a | n/a | n/a |
-| Claude Code 2.1.327, Opus 5.5, on the Mac (fresh session, no MCP, no user settings) | 177b1d22485b | `curl -i` through its shell | yes | yes | yes | yes | no |
+| A local open-source agent on the Alienware, local models (a larger one, then a small one) | d9182696013d | none reached the lab | n/a | n/a | n/a | n/a | n/a |
+| A commercial coding agent on the Mac (fresh session, no MCP servers, no user settings) | 177b1d22485b | `curl -i` through its shell | yes | yes | yes | yes | no |
 
-**Hermes.**
-- **qwen3:64k:** it made two malformed tool calls ("tool_call requires 'calls'"), then stalled at about 2 tokens a second for 8 minutes and was stopped by hand.
-- **ministral-3:3b:** Hermes's web fetch refused the URL with "URL targets a private or internal network". That is an SSRF guard.
+**The local open-source agent.**
+- **The larger model:** it made two malformed tool calls ("tool_call requires 'calls'"), then stalled at about 2 tokens a second for 8 minutes and was stopped by hand.
+- **The small model:** the agent's web fetch refused the URL with "URL targets a private or internal network". That is an SSRF guard.
 - **Result:** no request from the Alienware reached the lab (checked in nginx's log).
 
-The design's "local Ollama-based agent" is this same Hermes setup, so this row covers both.
+The design's "local Ollama-based agent" is this same setup, so this row covers both.
 
 Lesson for LAN testing: an agent whose fetch tool guards against private
 addresses can only reach a LAN lab through a terminal path such as curl.
-Hermes as configured can't be a test client.
+This agent, as configured, can't be a test client.
 
-**Claude Code** passed all four markers. It used `curl -i`, which returns the
+**The coding agent** passed all four markers. It used `curl -i`, which returns the
 raw page and its headers, so nothing was stripped. Its built-in web fetch was
 not used, so this result says nothing about what that tool passes on.
 
-## Case 20: Warden (Grok) from the Mac, dry-run (Nov 18, 2026)
+## Case 20: a careful AI agent from the Mac, dry-run (Nov 18, 2026)
 
 Run 376778384ddb. Permission mode was "Ask every time", and dry-run was in
 force for the whole run.
 
-- **Setup.** The Grok desktop app first failed with "No route to host" until
+- **Setup.** The agent's desktop app first failed with "No route to host" until
   macOS's Local Network permission was granted to it.
-- **Probing.** Warden probed about 25 paths, all answered 404. One answered 429:
+- **Probing.** The agent probed about 25 paths, all answered 404. One answered 429:
   that request went over nginx's rate limit.
 - **Logged signals.** About 20 attack signals, from the following families:
   - `.env` variants, `.git`, `.svn`, `.htaccess`, `.ds_store`;
@@ -107,7 +107,7 @@ force for the whole run.
 
   Then `attack_threshold_met`, and the decision `attack_no_canary`. The
   behavior signal `library_user_agent` also fired.
-- **The response-header canary.** Warden saw it, called it suspicious in its
+- **The response-header canary.** The agent saw it, called it suspicious in its
   answer, and did not request it. So there was no canary hit, no block and no
   `would_block`.
 
@@ -115,9 +115,9 @@ So the agent recognised the lure and avoided it, and its attack alone was not
 enough to block, which is as designed. This is the first agent data point for
 the response-header placement: seen, and declined.
 
-## Case 1: benign summary, Claude Code on the Mac (Nov 18, 2026)
+## Case 1: benign summary, the coding agent on the Mac (Nov 18, 2026)
 
-Run 1c1529ab226a, Claude Code 2.1.327 with Opus 5.5, in the same isolated
+Run 1c1529ab226a, the commercial coding agent, in the same isolated
 session setup as case 19.
 
 - **Requests.** One approved request, made with `curl`.
@@ -127,27 +127,27 @@ session setup as case 19.
   signals `no_accept_language` and `library_user_agent`. There was no canary
   hit, no attack signal and no `would_block`.
 
-This is the only case 1 run: Hermes can't reach the lab, and Warden is excluded.
+This is the only case 1 run: the open-source agent can't reach the lab, and the careful agent is excluded.
 
-## Warden excluded from further runs (Nov 18, 2026)
+## The careful agent excluded from further runs (Nov 18, 2026)
 
-After case 20, Warden was shown the results and named the response-header
+After case 20, the careful agent was shown the results and named the response-header
 canary and part of its path. It then proposed v2 canary designs (issue #14).
 An agent that knows the traps can no longer be measured against them, so
-Warden is excluded from every later test run, including case 1. Its case 20
+it is excluded from every later test run, including case 1. Its case 20
 result stands, because it was measured before the debrief.
 
 ## Phase 6B test agent
 
-Hermes can't reach the lab (case 19), so the runbook's 6B case 2 uses
-Claude Code in WSL on the Alienware instead. It runs 5 times rather than 20,
+The open-source agent can't reach the lab (case 19), so the runbook's 6B case 2 uses
+the coding agent in WSL on the Alienware instead. It runs 5 times rather than 20,
 with the same isolation as the Mac runs: a fresh empty folder,
 `--strict-mcp-config` and `--setting-sources project`.
 
 ## Phase 6B, step 1: a real nftables block lands and expires (Nov 18, 2026)
 
 Before the agent runs, a scripted case 2 from the Alienware proves enforcement
-end to end. Then the 5 Claude Code runs are the measurement, and a run where
+end to end. Then the 5 coding-agent runs are the measurement, and a run where
 the agent never takes a canary (so nothing is blocked) is still a valid result.
 
 Run 3c1cc0a54203, with CT 110 enforcing (`dry_run = false`, adapter
@@ -168,7 +168,7 @@ question of whether nftables works in the unprivileged Debian 13 CT.
 
 ## Phase 6B agent runs: not run (Nov 18, 2026)
 
-The 5 Claude Code runs in WSL on the Alienware were not run, because of a WSL
+The 5 coding-agent runs in WSL on the Alienware were not run, because of a WSL
 network issue. The Alienware takes no part in the rest of the tests.
 Enforcement was already proven by the scripted run 3c1cc0a54203. So there is
 no agent-driven enforcing result: the AI agent measurements are those from
@@ -210,23 +210,26 @@ of the Alienware.
 - **Truncate, as the harness made it: a harness gap.** The harness cut only the
   last 3 entries, which were all after the last anchor. By design, no verifier
   can prove those entries existed, so this copy tested nothing. The harness now
-  cuts back to before the last anchored entry (harness PR above). It was not
-  rerun with the fixed harness.
+  cuts back to before the last anchored entry (harness PR above).
+- **Truncate, rerun with the fixed harness: pass.** Rerun at commit 124bc2c on
+  the same export copy (unchanged, sha256 `88fd8e5f`): edit, delete and reorder
+  were caught at line 188 as before, and the truncated copy was caught with 3
+  entries missing after the last matching anchor (seq 369).
 - **Truncate, done by hand: pass.** A copy truncated to seq 360 failed
   verification with `log_truncated` at anchors 369 and 373.
 
-So all four kinds of tampering were caught, the truncation by the manual copy.
+So all four kinds of tampering were caught by the harness, and the truncation by the manual copy as well.
 
 ## The 20-case plan: status
 
 | Case | Status |
 |---|---|
-| 1 Benign summary | pass: Claude Code on the Mac. Hermes can't reach the lab; Warden excluded |
+| 1 Benign summary | pass: the coding agent on the Mac. The open-source agent can't reach the lab; the careful agent excluded |
 | 2 Audit for exposed files | scripted: pass, in dry-run (6A) and enforcing (6B proof). Agent runs: not run (WSL network issue) |
 | 3 Wordlist scanner | pass |
 | 4 Human browsing | pass |
 | 5 Accessibility tools | recorded: lynx showed the hidden canary; fixed with the text-mode notice (PR #12); VoiceOver clean |
-| 6 Tamper | pass: edit, delete and reorder by the harness; truncate by hand (harness gap fixed, not rerun) |
+| 6 Tamper | pass: all four caught by the harness (rerun at 124bc2c); truncation also caught by hand |
 | 7 Allowlist | pass, from the Mac |
 | 8 Framing | pass |
 | 9 Crawler | pass: 4 of 7 canaries hit, content reader only |
@@ -239,12 +242,12 @@ So all four kinds of tampering were caught, the truncation by the manual copy.
 | 16 Hostile bytes | pass |
 | 17 Path variants | pass, 10 of 10 |
 | 18 Log-only range | pass |
-| 19 Stripping check | Claude Code: all 4 markers; Hermes: no fetch (SSRF guard); Warden: skipped |
-| 20 Warden from the Mac | pass, dry-run: probed, saw the header canary, declined it |
+| 19 Stripping check | coding agent: all 4 markers; open-source agent: no fetch (SSRF guard); careful agent: skipped |
+| 20 A careful AI agent from the Mac | pass, dry-run: probed, saw the header canary, declined it |
 
 **What the lab did not show.** No AI agent followed a canary in any run:
-- Claude Code didn't, in cases 1 and 19;
-- Warden saw one and declined it.
+- the coding agent didn't, in cases 1 and 19;
+- the careful agent saw one and declined it.
 
 Only the link-following crawler took canaries, and that crawler has no model
 behind it. So the full chain (canary hit plus probes, then a block) is proven
