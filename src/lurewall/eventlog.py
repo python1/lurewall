@@ -138,9 +138,15 @@ class EventLog:
                 fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise LogLockedError(f"{self.path} is locked by another writer") from exc
+            if self._checkpoint_path is not None:
+                with contextlib.suppress(OSError):
+                    if os.path.samestat(os.fstat(self._fd), self._checkpoint_path.stat()):
+                        raise ValueError("checkpoint path must differ from the event log path")
             torn = self._recover()
             self._load_checkpoint_state()
             if torn is not None:
+                os.ftruncate(self._fd, self._size)
+                os.fsync(self._fd)
                 now = self._clock()
                 self._write_guarded("torn_tail_repaired", None, torn, now)
         except BaseException:
@@ -178,9 +184,9 @@ class EventLog:
         """Find the last entry of an existing log. Returns torn-tail details, if any.
 
         Only the last line is checked here; ``lurewall verify`` checks the
-        whole chain. A final line with no newline is a write that a crash cut
-        short: it was never a complete entry, so it is removed and the removal
-        is logged. A complete last line that does not verify is never
+        whole chain. A final line with no newline is treated as an incomplete
+        write. The caller removes it and logs the removal after checking the
+        checkpoint. A complete last line that does not verify is never
         "repaired": the writer refuses to extend it.
         """
         size = os.fstat(self._fd).st_size
@@ -193,8 +199,6 @@ class EventLog:
                 raise LogCorruptError("log ends in an unterminated run longer than any entry")
             tail = buf[cut + 1 :]
             size -= len(tail)
-            os.ftruncate(self._fd, size)
-            os.fsync(self._fd)
             buf = buf[: cut + 1]
             torn = {"bytes": len(tail), "sha256": sha256_hex(tail)}
         self._size = size
@@ -223,9 +227,15 @@ class EventLog:
             checkpoint = entry_mod.check_checkpoint(json.loads(raw), self._public_key)
         except (OSError, ValueError, RecursionError):
             return  # missing or unusable: the next checkpoint replaces it
-        if checkpoint["seq"] <= self._seq:
-            self._checkpoint_seq = checkpoint["seq"]
-            self._checkpoint_ts = checkpoint["ts"]
+        seq = checkpoint["seq"]
+        if seq > self._seq:
+            raise LogCorruptError("published checkpoint is ahead of the log; refusing to append")
+        if seq == self._seq and checkpoint["head_hash"] != self._head:
+            raise LogCorruptError(
+                "published checkpoint disagrees with the log head; refusing to append"
+            )
+        self._checkpoint_seq = seq
+        self._checkpoint_ts = checkpoint["ts"]
 
     # -- appending ----------------------------------------------------------
 

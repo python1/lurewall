@@ -132,42 +132,71 @@ def _parse_value(value: object, version: int) -> tuple[str, str | None]:
     try:
         if type(value) is str:
             address = ipaddress.ip_address(value)
-            if address.version != version:
+            if address.version != version or "%" in value:
                 raise ValueError("family")
             return address.compressed, (address.compressed if version == 4 else None)
         if type(value) is dict and set(value) == {"prefix"}:
             prefix = value["prefix"]
-            if type(prefix) is not dict or type(prefix.get("len")) is not int:
+            if type(prefix) is not dict or set(prefix) != {"addr", "len"}:
                 raise ValueError("prefix")
-            network = ipaddress.ip_network(f"{prefix.get('addr')}/{prefix['len']}", strict=False)
+            address, length = prefix["addr"], prefix["len"]
+            if type(address) is not str or "%" in address or type(length) is not int:
+                raise ValueError("prefix")
+            network = ipaddress.ip_network(f"{address}/{length}", strict=True)
             if network.version != version:
                 raise ValueError("family")
             is_source = version == 6 and network.prefixlen == 64
             return network.compressed, (network.compressed if is_source else None)
         if type(value) is dict and set(value) == {"range"}:
-            low, high = (ipaddress.ip_address(item) for item in value["range"])
-            if low.version != version or high.version != version:
-                raise ValueError("family")
+            bounds = value["range"]
+            if type(bounds) is not list or len(bounds) != 2:
+                raise ValueError("range")
+            if any(type(item) is not str or "%" in item for item in bounds):
+                raise ValueError("range")
+            low, high = (ipaddress.ip_address(item) for item in bounds)
+            if low.version != version or high.version != version or low > high:
+                raise ValueError("range")
             return f"{low.compressed}-{high.compressed}", None
     except (ValueError, TypeError) as exc:
         raise NftError("nft listed an element in an unexpected form") from exc
     raise NftError("nft listed an element in an unexpected form")
 
 
-def parse_set(output: str, set_name: str) -> list[LiveEntry]:
-    """Read ``nft -j list set`` output. Raises NftError on anything unexpected."""
-    version = 4 if set_name == SET4 else 6
+def _listing_items(output: str, kind: str) -> list[dict]:
     try:
         doc = json.loads(output)
         items = doc["nftables"]
-        sets = [item["set"] for item in items if type(item) is dict and "set" in item]
+        if type(items) is not list:
+            raise ValueError("nftables")
+        for item in items:
+            if type(item) is not dict or len(item) != 1:
+                raise ValueError("listing entry")
+            ((name, body),) = item.items()
+            if name not in ("metainfo", kind) or type(body) is not dict:
+                raise ValueError("listing entry")
+        return items
+    except (ValueError, KeyError, TypeError, RecursionError) as exc:
+        raise NftError("nft printed a listing in an unexpected form") from exc
+
+
+def parse_set(output: str, set_name: str) -> list[LiveEntry]:
+    """Read ``nft -j list set`` output. Raises NftError on anything unexpected."""
+    if set_name not in (SET4, SET6):
+        raise NftError("unexpected set name")
+    version = 4 if set_name == SET4 else 6
+    try:
+        sets = [item["set"] for item in _listing_items(output, "set") if "set" in item]
         (found,) = sets
-        if found.get("name") != set_name or found.get("table") != TABLE:
+        if (
+            found.get("name") != set_name
+            or found.get("table") != TABLE
+            or found.get("family") != FAMILY
+        ):
             raise ValueError("wrong set")
         elements = found.get("elem", [])
         if type(elements) is not list:
             raise ValueError("elem")
-    except (ValueError, KeyError, TypeError, RecursionError) as exc:
+    except ValueError as exc:
         raise NftError("nft printed a set listing in an unexpected form") from exc
 
     entries = []
@@ -223,14 +252,14 @@ class NftAdapter:
 
     def installed(self) -> bool:
         """Whether the Lurewall table exists at all."""
-        try:
-            doc = json.loads(self._run(["-j", "list", "tables"], None))
-            tables = [item["table"] for item in doc["nftables"] if "table" in item]
-            return any(
-                table.get("family") == FAMILY and table.get("name") == TABLE for table in tables
-            )
-        except (ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise NftError("nft printed a table listing in an unexpected form") from exc
+        items = _listing_items(self._run(["-j", "list", "tables"], None), "table")
+        tables = [item["table"] for item in items if "table" in item]
+        if any(
+            type(table.get("family")) is not str or type(table.get("name")) is not str
+            for table in tables
+        ):
+            raise NftError("nft printed a table listing in an unexpected form")
+        return any(table["family"] == FAMILY and table["name"] == TABLE for table in tables)
 
     def _add_line(self, set_name: str, element: str, expiry_ms: int, now: int) -> str:
         seconds = max(1, -(-(expiry_ms - now) // 1000))  # round up: never shorter than asked

@@ -148,6 +148,7 @@ class Engine:
         self._sink = sink
         self._tracker = tracker
         self._adapter = adapter if adapter is not None else LogOnlyAdapter()
+        self._enforcing = config.enforcing and not isinstance(self._adapter, LogOnlyAdapter)
         self._clock = clock
         self._alert_out = alert
         self._state_path = None if state_path is None else Path(state_path)
@@ -169,6 +170,7 @@ class Engine:
         self._last_save = 0
         # Blocks decided but not yet in place because the adapter failed.
         self._pending: set[str] = set()
+        self._reconcile_pending = False
         if self._state_path is not None:
             self._load()
 
@@ -214,6 +216,8 @@ class Engine:
         """Expire blocks that are due, retry failed ones, save state. Safe to call often."""
         now = self._clock() if now_ms is None else now_ms
         self._expire(now)
+        if self._reconcile_pending:
+            self._reconcile(now)
         for source in sorted(self._pending):
             block = self._blocks.get(source)
             if block is None or not block.enforced:
@@ -225,22 +229,36 @@ class Engine:
     def start(self) -> ReconcileReport | None:
         """Reconcile the adapter with saved state. Call once, before any record.
 
-        Blocks that expired while the engine was down are expired first. The
-        adapter then removes live entries that are expired or unknown and
-        puts back unexpired blocks that are missing. In dry-run nothing is
-        touched and nothing is reconciled.
+        Expire blocks first, then reconcile only when enforcement is enabled.
         """
         now = self._clock()
         self._expire(now)
-        if self.config.dry_run:
-            return None
-        wanted = {source: block.expiry for source, block in self._blocks.items() if block.enforced}
+        return self._reconcile(now) if self._enforcing else None
+
+    def _reconcile(self, now: int) -> ReconcileReport | None:
+        protected = {source for source in self._blocks if self._protected_reason(source)}
+        wanted = {
+            source: block.expiry
+            for source, block in self._blocks.items()
+            if block.enforced and source not in protected
+        }
         try:
             report = self._adapter.reconcile(wanted)
         except Exception as exc:
             self._adapter_failed("reconcile", None, exc)
-            self._pending.update(wanted)
+            if not self._reconcile_pending:
+                # A single invalid saved block can make the whole adapter call
+                # fail. Give other wanted blocks their existing per-source retry.
+                self._pending.update(wanted)
+            self._reconcile_pending = True
             return None
+        self._reconcile_pending = False
+        self._pending.difference_update(wanted, protected)
+        for source in protected:
+            del self._blocks[source]
+        if protected:
+            self._dirty = True
+            self._save(now, force=True)
         for element, reason in report.removed:
             self._sink.append("enforcement_removed", None, {"element": element, "reason": reason})
         for source in report.restored:
@@ -298,7 +316,7 @@ class Engine:
         known = self._issued.get(request_id)
         if known is not None:
             return  # a line read twice, or an ID already bound: first issue wins
-        mine = self._issued_by.setdefault(source, deque())
+        mine = self._issued_by.get(source, deque())
         while len(mine) >= self.config.max_ids_per_source:
             # A source rotates out its own oldest IDs before anyone else's.
             self._issued.pop(mine.popleft(), None)
@@ -313,6 +331,7 @@ class Engine:
             self._sink.append("engine_state_evicted", None, {"table": "issued_id"}, rollup_key="id")
         self._issued[request_id] = (source, when)
         mine.append(request_id)
+        self._issued_by[source] = mine
 
     def _serve(self, source: str, canary_id: str, when: int) -> None:
         key = (source, canary_id)
@@ -432,6 +451,14 @@ class Engine:
 
     # -- the decision table ----------------------------------------------------------------
 
+    def _protected_reason(self, source: str) -> str | None:
+        network = source_network(source)
+        if _overlaps(network, self.config.log_only):
+            return LOG_ONLY_RANGE
+        if _overlaps(network, self.config.allowlist):
+            return ALLOWLISTED
+        return None
+
     def _note_cross_site(self, observation: Observation, now: int) -> Decision | None:
         view = observation.view
         if view.threshold_met or not self.has_counted_hit(view.source, now):
@@ -476,13 +503,11 @@ class Engine:
             return log(ATTACK_NO_CANARY, signals=list(view.attack_keys))
 
         # A counted canary hit and the attack threshold: the block row.
-        if source in self._blocks:
-            return Decision(ALREADY_BLOCKED, source)
         signals = list(view.attack_keys)
-        network = source_network(source)
-        if _overlaps(network, self.config.log_only):
+        protected = self._protected_reason(source)
+        if protected == LOG_ONLY_RANGE:
             return log(LOG_ONLY_RANGE, signals=signals)
-        if _overlaps(network, self.config.allowlist):
+        if protected == ALLOWLISTED:
             self._sink.append(
                 "would_block",
                 source,
@@ -490,6 +515,8 @@ class Engine:
                 rollup_key=ALLOWLISTED,
             )
             return Decision(ALLOWLISTED, source)
+        if source in self._blocks:
+            return Decision(ALREADY_BLOCKED, source)
         if len(self._blocks) >= self.config.cap:
             self._sink.append(
                 "cap_reached",
@@ -502,7 +529,7 @@ class Engine:
 
         ttl = self._ttl(source, view.normal_browsing, now)
         expiry = now + ttl
-        enforced = not self.config.dry_run
+        enforced = self._enforcing
         detail = {
             **where,
             "signals": signals,
@@ -517,7 +544,8 @@ class Engine:
             # The decision is logged whether or not the adapter managed it.
             self._sink.append("block", source, {**detail, "applied": self._apply(source, expiry)})
         else:
-            self._sink.append("would_block", source, {**detail, "reason": "dry_run"})
+            reason = "dry_run" if self.config.dry_run else "log_only_adapter"
+            self._sink.append("would_block", source, {**detail, "reason": reason})
         self._blocks[source] = _Block(start=now, expiry=expiry, ttl=ttl, enforced=enforced)
         self._history[source] = (ttl, expiry)
         self._history.move_to_end(source)
@@ -546,7 +574,7 @@ class Engine:
         for source in due:
             block = self._blocks.pop(source)
             self._pending.discard(source)
-            if block.enforced:
+            if block.enforced and self._enforcing:
                 try:
                     self._adapter.unblock(source)
                 except Exception as exc:

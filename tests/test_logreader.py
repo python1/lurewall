@@ -314,6 +314,25 @@ def test_truncation_while_running_is_logged(make_reader, access, sink):
     assert len(events(sink, "log_truncated")) == 1
 
 
+@pytest.mark.parametrize("restart", [False, True])
+def test_regrown_log_is_read_from_the_start(make_reader, access, sink, restart):
+    append(access, numbered(1, 4))
+    reader = make_reader()
+    assert uris(reader.poll()) == expect_uris(1, 4)
+    previous = access.stat()
+
+    access.write_bytes(numbered(10, 20))
+    current = access.stat()
+    assert current.st_ino == previous.st_ino and current.st_size > previous.st_size
+    if restart:
+        reader.commit()
+        reader.close()
+        reader = make_reader()
+
+    assert uris(reader.poll()) == expect_uris(10, 20)
+    assert len(events(sink, "log_truncated")) == 1
+
+
 def test_a_final_line_cut_off_by_rotation_is_a_parse_failure(make_reader, access, sink):
     cut = line(uri=b"/cut")[:50]
     append(access, numbered(1, 1) + cut)

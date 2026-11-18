@@ -53,6 +53,7 @@ DEFAULT_REPORT_INTERVAL_MS = 60_000
 
 _CHUNK_BYTES = 64 * 1024
 _HEAD_BYTES = 256
+_READ_TAIL_BYTES = 256
 _STATE_VERSION = 1
 _MAX_STATE_BYTES = 4096
 _MAX_ROTATED_CANDIDATES = 10_000
@@ -141,6 +142,7 @@ class LogReader:
         self._dev = 0
         self._inode = 0
         self._read_pos = 0  # next byte to read
+        self._read_tail = b""  # bytes immediately before the next read
         self._line_start = 0  # offset of the first byte not yet turned into a line
         self._buf = b""  # the unfinished line, when it is short enough to keep
         self._long_hash: hashlib._Hash | None = None  # set while skipping an overlong line
@@ -207,6 +209,7 @@ class LogReader:
         """
         if self._fd is None:
             return
+        self._check_truncated()
         head_len = min(_HEAD_BYTES, self._line_start)
         state = {
             "v": _STATE_VERSION,
@@ -238,6 +241,8 @@ class LogReader:
         self._dev = info.st_dev
         self._inode = info.st_ino
         self._read_pos = start
+        tail_len = min(_READ_TAIL_BYTES, start)
+        self._read_tail = os.pread(fd, tail_len, start - tail_len) if tail_len else b""
         self._line_start = start
         self._buf = b""
         self._long_hash = None
@@ -388,15 +393,19 @@ class LogReader:
     def _check_truncated(self) -> None:
         size = os.fstat(self._fd).st_size
         if size >= self._read_pos:
-            return
-        # The file shrank under the reader (copytruncate, or someone emptied
-        # it). Whatever lay between the old position and the cut is gone.
+            tail_len = len(self._read_tail)
+            if not tail_len or os.pread(self._fd, tail_len, self._read_pos - tail_len) == (
+                self._read_tail
+            ):
+                return
+        # A same-inode rewrite can already have grown past the old cursor.
         self._sink.append(
             "log_truncated",
             None,
             {"saved_inode": self._inode, "saved_offset": self._read_pos, "size": size},
         )
         self._read_pos = self._line_start = 0
+        self._read_tail = b""
         self._buf = b""
         self._long_hash = None
         self._long_len = 0
@@ -422,6 +431,7 @@ class LogReader:
                 break
             self._rotation_polls = 0
             self._read_pos += len(chunk)
+            self._read_tail = (self._read_tail + chunk[-_READ_TAIL_BYTES:])[-_READ_TAIL_BYTES:]
             budget -= len(chunk)
             self._feed(chunk, records, now)
         self._report(now)

@@ -463,12 +463,8 @@ def test_parse_set_reads_every_form_nft_prints():
         ("2001:db8::1", None, None),
         ("2001:db8::/48", None, None),
     ]
-    assert (
-        nft.parse_set(
-            json.dumps({"nftables": [{"set": {"name": SET4, "table": "lurewall"}}]}), SET4
-        )
-        == []
-    )
+    empty = {"family": "inet", "name": SET4, "table": "lurewall"}
+    assert nft.parse_set(json.dumps({"nftables": [{"set": empty}]}), SET4) == []
 
 
 @pytest.mark.parametrize(
@@ -502,6 +498,8 @@ def test_a_comment_that_is_not_exactly_an_expiry_gives_none(comment):
         "{}",
         '{"nftables": {}}',
         '{"nftables": []}',
+        '{"nftables": [{"set": []}]}',
+        '{"nftables": [{"set": {"family": "ip", "name": "blocked4", "table": "lurewall"}}]}',
         '{"nftables": [{"set": {"name": "blocked4", "table": "other", "elem": []}}]}',
         '{"nftables": [{"set": {"name": "blocked6", "table": "lurewall", "elem": []}}]}',
         '{"nftables": [{"set": {"name": "blocked4", "table": "lurewall", "elem": {}}}]}',
@@ -511,8 +509,11 @@ def test_a_comment_that_is_not_exactly_an_expiry_gives_none(comment):
         listing([None]),
         listing([{"elem": {"val": {"prefix": {"addr": "192.0.2.0", "len": "24"}}}}]),
         listing([{"elem": {"val": {"prefix": {"addr": "192.0.2.0", "len": 99}}}}]),
+        listing([{"prefix": {"addr": "192.0.2.1", "len": 24}}]),
         listing([{"range": ["192.0.2.1"]}]),
         listing([{"range": ["192.0.2.1", "2001:db8::1"]}]),
+        listing([{"range": {"192.0.2.1": 0, "192.0.2.2": 0}}]),
+        listing([{"range": ["192.0.2.2", "192.0.2.1"]}]),
         listing([{"elem": {"val": {"concat": ["192.0.2.1", 80]}}}]),
         listing([{"elem": {}}]),
         listing(["192.0.2.1 }; flush ruleset"]),
@@ -522,6 +523,19 @@ def test_a_comment_that_is_not_exactly_an_expiry_gives_none(comment):
 def test_an_unexpected_listing_is_an_error_and_never_a_guess(output):
     with pytest.raises(NftError):
         nft.parse_set(output, SET4)
+
+
+def test_a_scoped_address_is_rejected_in_a_set_listing():
+    with pytest.raises(NftError):
+        nft.parse_set(listing(["2001:db8::1%scope"], name=SET6), SET6)
+
+
+@pytest.mark.parametrize("items", [{}, [{"table": []}], [{"unexpected": {}}], [1]])
+def test_a_malformed_tables_listing_is_not_reported_as_absence(items):
+    adapter = NftAdapter(lambda _args, _stdin: json.dumps({"nftables": items}), dry_run=False)
+
+    with pytest.raises(NftError):
+        adapter.installed()
 
 
 def test_an_unexpected_listing_stops_reconcile_and_sweep_before_any_change():

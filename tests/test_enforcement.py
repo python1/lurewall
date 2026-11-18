@@ -7,6 +7,7 @@ test_nft's real-backend run.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import shutil
 import subprocess
@@ -130,7 +131,9 @@ def test_nothing_is_enforced_by_default():
 def test_the_default_adapter_is_log_only():
     assert EngineConfig().adapter == "log-only"
     rig = Rig(dry_run=False, adapter="log-only")
-    assert rig.attack().outcome == engine.BLOCK
+    assert rig.attack().outcome == engine.WOULD_BLOCK
+    assert rig.sink.of("would_block")[0][2]["reason"] == "log_only_adapter"
+    assert rig.sink.of("block") == []
     assert rig.fake.calls == []
 
 
@@ -201,8 +204,6 @@ def test_a_backlog_of_old_events_enforces_nothing():
 
 
 def test_guarded_sources_never_reach_nftables():
-    import ipaddress
-
     rig = Rig(
         dry_run=False,
         allowlist=(ipaddress.ip_network("192.0.2.0/24"),),
@@ -377,6 +378,57 @@ def test_blocks_decided_in_dry_run_are_never_put_in_place_later(tmp_path):
     assert again.sink.of("block_restored") == []
 
 
+def test_log_only_decisions_are_never_installed_on_switch_to_nftables(tmp_path):
+    state = tmp_path / "engine.json"
+    rig = Rig(state_path=state, dry_run=False, adapter="log-only")
+    rig.attack()
+
+    again = restart(rig, state, dry_run=False)
+    assert again.live() == {}
+    assert again.sink.of("block_restored") == []
+
+
+@pytest.mark.parametrize(
+    ("policy", "source", "protected"),
+    [("allowlist", AGENT, "192.0.2.0/24"), ("log_only", "2001:db8::11", "2001:db8::22/128")],
+)
+@pytest.mark.parametrize("live", [True, False])
+def test_startup_reconcile_honors_current_protected_ranges(
+    tmp_path, policy, source, protected, live
+):
+    state = tmp_path / "engine.json"
+    rig = Rig(dry_run=False, state_path=state)
+    rig.attack(ip=source)
+    if not live:
+        rig.fake.reboot()
+
+    again = restart(rig, state, dry_run=False, **{policy: (ipaddress.ip_network(protected),)})
+
+    assert again.live() == {}
+    assert again.engine.active_blocks() == {}
+    assert engine.read_status(state, rig.clock.now)["active_blocks"] == 0
+    assert again.sink.of("block_restored") == []
+
+
+def test_reconcile_retries_protected_removal_after_backend_recovers(tmp_path):
+    state = tmp_path / "engine.json"
+    rig = Rig(dry_run=False, state_path=state)
+    decision = rig.attack()
+    rig.fake.fail = True
+
+    again = restart(rig, state, dry_run=False, allowlist=(ipaddress.ip_network(AGENT),))
+    assert again.report is None
+    assert again.engine.active_blocks() == {AGENT: decision.expiry_ms}
+    assert engine.read_status(state, rig.clock.now)["active_blocks"] == 1
+
+    rig.fake.fail = False
+    again.engine.tick()
+    assert again.live() == {}
+    assert again.engine.active_blocks() == {}
+    assert engine.read_status(state, rig.clock.now)["active_blocks"] == 0
+    assert again.sink.of("block_restored") == []
+
+
 def test_a_failed_reconcile_is_logged_and_the_blocks_are_retried(tmp_path):
     state = tmp_path / "engine.json"
     rig = Rig(dry_run=False, ttl_ms=HOUR, state_path=state)
@@ -469,6 +521,23 @@ def test_a_sweeper_failure_is_logged_and_the_next_run_tries_again(tmp_path, key)
     rig.fake.fail = False
     assert service.sweep(log, key, runner=rig.fake, clock=rig.clock, fsync=False) == (1, True)
     assert rig.live() == {}
+    assert verify_log(log, signing.EurekaSigner.load(key).public_key_hex).ok
+
+
+def test_the_sweeper_signs_a_failure_for_a_malformed_set_listing(tmp_path, key):
+    clock = FakeClock(T0)
+    fake = FakeNft(clock)
+    NftAdapter(fake, clock=clock, dry_run=False).ensure()
+    log = tmp_path / "sweeper.log"
+
+    def runner(args, stdin):
+        if args[:3] == ["-j", "list", "set"]:
+            return json.dumps({"nftables": [{"set": []}]})
+        return fake(args, stdin)
+
+    assert service.sweep(log, key, runner=runner, clock=clock, fsync=False) == (0, False)
+    (entry,) = entries(log)
+    assert entry["type"] == "sweep_failed"
     assert verify_log(log, signing.EurekaSigner.load(key).public_key_hex).ok
 
 
@@ -685,6 +754,14 @@ def test_the_run_command_processes_the_log_once_in_dry_run(lab, capsys):
     assert "attack_signal" in seen and "block" not in seen
     # Run by the real clock, these fixture lines are stale: nothing would be enforced.
     assert "would_block" not in seen
+
+
+def test_the_run_command_reports_log_only_without_dry_run(lab, capsys):
+    paths = lab("version = 1\ndry_run = false\n")
+    paths.access_log.write_bytes(b"")
+
+    assert cli.main(run_argv(paths)) == cli.EXIT_OK
+    assert "lurewall is running (log-only)" in capsys.readouterr().out
 
 
 def test_two_services_cannot_share_one_log(lab):

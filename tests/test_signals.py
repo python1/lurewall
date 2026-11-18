@@ -97,6 +97,13 @@ def test_a_path_hidden_behind_dot_segments_is_caught_in_its_raw_form():
     assert "path:/admin" in attack("/admin/../index.html")
 
 
+@pytest.mark.parametrize("query", ["language=en", "next=/docs/guide"])
+def test_absolute_target_keeps_the_query_when_the_path_is_implicit(query):
+    target = f"https://site.example?{query}"
+    assert signals._strip_origin(target) == f"/?{query}"
+    assert signals.normalized_path(target) == "/"
+
+
 @pytest.mark.parametrize(
     "uri",
     [

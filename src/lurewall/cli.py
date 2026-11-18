@@ -468,7 +468,9 @@ def _service_command(args: argparse.Namespace) -> int:
         # Config, canary and key errors are ValueErrors written by Lurewall.
         print(f"{name}: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    mode = "dry-run" if running.config.dry_run else f"ENFORCING with {running.config.adapter}"
+    mode = "dry-run" if running.config.dry_run else "log-only"
+    if running.config.enforcing:
+        mode = f"ENFORCING with {running.config.adapter}"
     print(f"lurewall is running ({mode})", flush=True)
     stop = threading.Event()
     for signum in (signal.SIGTERM, signal.SIGINT):

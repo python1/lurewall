@@ -492,6 +492,24 @@ def test_checkpoint_holds_hashes_only(make_log, tmp_path):
     assert [item.name for item in tmp_path.iterdir() if item.name.startswith(".checkpoint-")] == []
 
 
+@pytest.mark.parametrize("alias", [False, True], ids=["same-path", "directory-alias"])
+def test_checkpoint_target_cannot_share_the_event_log(make_log, tmp_path, alias):
+    log = make_log()
+    log.append("probe")
+    log.close()
+    original = log.path.read_bytes()
+    checkpoint_path = log.path
+    if alias:
+        directory_alias = tmp_path / "alias"
+        directory_alias.symlink_to(tmp_path, target_is_directory=True)
+        checkpoint_path = directory_alias / log.path.name
+
+    with pytest.raises(ValueError, match="checkpoint path must differ from the event log"):
+        make_log(checkpoint_path=checkpoint_path)
+
+    assert log.path.read_bytes() == original
+
+
 def test_close_writes_a_final_checkpoint(make_log, tmp_path):
     path = tmp_path / "checkpoint.json"
     log = make_log(checkpoint_path=path, checkpoint_every=10**9, checkpoint_interval_ms=10**12)
@@ -519,6 +537,58 @@ def test_restart_does_not_lose_the_checkpoint_position(make_log, tmp_path):
     assert read_checkpoint(again, path)["seq"] == 3
     again.append("probe")
     assert read_checkpoint(again, path)["seq"] == 8
+
+
+def test_restart_refuses_a_log_shorter_than_its_checkpoint(make_log, tmp_path):
+    checkpoint_path = tmp_path / "checkpoint.json"
+    log = make_log(checkpoint_path=checkpoint_path)
+    log.append("probe")
+    log.append("probe")
+    log.close()
+    checkpoint = checkpoint_path.read_bytes()
+    first, last = read_lines(log.path)
+    interrupted = first + last[:-1]
+    log.path.write_bytes(interrupted)
+
+    with pytest.raises(LogCorruptError, match="checkpoint"):
+        make_log(checkpoint_path=checkpoint_path)
+
+    assert log.path.read_bytes() == interrupted
+    assert checkpoint_path.read_bytes() == checkpoint
+
+
+def test_restart_refuses_a_log_head_that_disagrees_with_its_checkpoint(make_log, tmp_path):
+    checkpoint_path = tmp_path / "checkpoint.json"
+    original = make_log(checkpoint_path=checkpoint_path)
+    original.append("probe")
+    original.close()
+    checkpoint = checkpoint_path.read_bytes()
+    backup = make_log(name="backup.log")
+    backup.append("probe", detail={"fixture": "backup"})
+    backup.close()
+    restored = backup.path.read_bytes()
+    original.path.write_bytes(restored)
+
+    with pytest.raises(LogCorruptError, match="checkpoint"):
+        make_log(checkpoint_path=checkpoint_path)
+
+    assert original.path.read_bytes() == restored
+    assert checkpoint_path.read_bytes() == checkpoint
+
+
+def test_restart_repairs_a_torn_write_after_the_checkpoint(make_log, tmp_path):
+    checkpoint_path = tmp_path / "checkpoint.json"
+    log = make_log(checkpoint_path=checkpoint_path)
+    checkpointed = log.append("probe")
+    log.close()
+    torn = b'{"detail":'
+    log.path.write_bytes(log.path.read_bytes() + torn)
+
+    restarted = make_log(checkpoint_path=checkpoint_path)
+
+    repaired = entries(restarted)[-1]
+    assert (repaired.type, repaired.prev_hash) == ("torn_tail_repaired", checkpointed.hash)
+    assert verify_log(log.path, log.public_key_hex).ok
 
 
 @pytest.mark.parametrize("junk", [b"", b"not json", b"[]", b'{"seq":999}', b"[" * 100_000])
