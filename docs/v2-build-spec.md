@@ -132,7 +132,7 @@ and has something before it.
   second hosted coding agent, and a fresh agent with no Lurewall context. Others
   when available.
 - Controls, expecting zero blocks:
-  - Mac browser browsing
+  - browsing from test machine A
   - VoiceOver
   - lynx
   - a robots.txt-respecting crawler

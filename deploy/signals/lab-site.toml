@@ -12,7 +12,7 @@ version = 1
 [site]
 # Every name and address the site is reached by. A request whose Referer names
 # any other host is cross-site and counts for nothing.
-hosts = ["192.168.1.160"]
+hosts = ["192.0.2.160"]
 # The lab site is plain HTTP. Browsers send Sec-Fetch-Site only to secure
 # origins, so on this site the header is ignored: a real browser never sends
 # it here, and its presence is logged as a behavior signal.
