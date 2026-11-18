@@ -239,6 +239,15 @@ def test_dry_run_traffic_during_the_would_be_block_does_not_carry_over():
 # -- request-ID binding ----------------------------------------------------------------
 
 
+def test_a_head_response_can_bind_a_v1_header_reference():
+    rig = Rig()
+    rig.send("/", method="HEAD")
+    header = next(c for c in rig.canaries.canaries if c.placement == "response_header")
+    reference = header.reference(rig.last.record.request_id)
+
+    assert outcome(rig.send(reference)) == engine.CONTENT_READER
+
+
 def test_a_relayed_hit_counts_for_neither_source():
     # Design test case 10: a reference served to one machine, requested from another.
     rig = Rig(dry_run=False)
@@ -1062,6 +1071,14 @@ def test_a_quiet_hit_without_its_page_counts_for_nobody():
     # The carrier of A does not bind B.
     assert quiet_hit(rig, "footer_comment.quiet", "/robots.txt", ip=OTHER) is None
     assert rig.sink.of("canary_hit") == []
+
+
+def test_a_head_response_does_not_bind_a_quiet_hit():
+    rig = Rig()
+    rig.send("/", method="HEAD")
+
+    assert quiet_hit(rig, "footer_comment.quiet", "/", served=False) is None
+    assert rig.sink.of("canary_unbound")[-1][2]["reason"] == "not_served"
 
 
 def test_a_quiet_binding_expires_after_the_id_ttl():

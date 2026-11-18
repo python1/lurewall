@@ -58,6 +58,7 @@ STATE_VERSION = 1
 MAX_STATE_BYTES = 8 * 1024 * 1024
 MAX_HISTORY_SOURCES = 10_000
 _SAVE_INTERVAL_MS = 5_000
+_RECONCILE_INTERVAL_MS = 60_000
 _RECONCILE_INITIAL_RETRY_MS = 1_000
 _RECONCILE_MAX_RETRY_MS = 60_000
 
@@ -172,6 +173,7 @@ class Engine:
         self._last_save = 0
         # Blocks decided but not yet in place because the adapter failed.
         self._pending: set[str] = set()
+        self._last_reconciled_ms: int | None = None
         self._reconcile_retry: tuple[int, int] | None = None  # last attempt end, delay
         if self._state_path is not None:
             self._load()
@@ -215,7 +217,7 @@ class Engine:
         return decision
 
     def tick(self, now_ms: int | None = None) -> None:
-        """Expire blocks that are due, retry failed ones, save state. Safe to call often."""
+        """Expire blocks, retry failures, reconcile periodically and save state."""
         now = self._clock() if now_ms is None else now_ms
         self._expire(now)
         if self._reconcile_retry is not None:
@@ -223,6 +225,10 @@ class Engine:
             if 0 <= now - last_attempt < delay:
                 self._save(now)
                 return  # the per-source fallback uses the same adapter
+            self._reconcile(now)
+        elif self._last_reconciled_ms is not None and not (
+            0 <= now - self._last_reconciled_ms < _RECONCILE_INTERVAL_MS
+        ):
             self._reconcile(now)
         for source in sorted(self._pending):
             block = self._blocks.get(source)
@@ -246,6 +252,7 @@ class Engine:
         return self._reconcile(now) if self._enforcing else None
 
     def _reconcile(self, now: int) -> ReconcileReport | None:
+        first_or_retry = self._last_reconciled_ms is None or self._reconcile_retry is not None
         protected = {
             source: reason
             for source in self._blocks
@@ -270,6 +277,7 @@ class Engine:
             self._reconcile_retry = (max(now, self._clock()), delay)
             return None
         self._reconcile_retry = None
+        self._last_reconciled_ms = max(now, self._clock())
         self._pending.difference_update(wanted, protected)
         for source, reason in protected.items():
             block = self._blocks.pop(source)
@@ -285,15 +293,16 @@ class Engine:
             self._sink.append("enforcement_removed", None, {"element": element, "reason": reason})
         for source in report.restored:
             self._sink.append("block_restored", source, {"expiry_ms": wanted[source]})
-        self._sink.append(
-            "reconcile",
-            None,
-            {
-                "kept": report.kept,
-                "removed": len(report.removed),
-                "restored": len(report.restored),
-            },
-        )
+        if first_or_retry or protected or report.removed or report.restored:
+            self._sink.append(
+                "reconcile",
+                None,
+                {
+                    "kept": report.kept,
+                    "removed": len(report.removed),
+                    "restored": len(report.restored),
+                },
+            )
         return report
 
     def _adapter_failed(self, action: str, source: str | None, exc: Exception) -> None:

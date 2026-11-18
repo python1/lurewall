@@ -336,8 +336,12 @@ class NftAdapter:
             self._check_expiry(expiry_ms, now)
             if expiry_ms > now:
                 targets[source] = (*element_for(source), expiry_ms)
+        if self._ready and not self.installed():
+            self._ready = False
+        # Refresh the managed chain in the same transaction as element changes.
+        # A malformed listing below still prevents any changes to a live table.
+        lines = RULESET.splitlines() if self._ready else []
         self.ensure()
-        lines = []
         in_place = set()
         for entry in self.list():
             target = targets.get(entry.source) if entry.source is not None else None

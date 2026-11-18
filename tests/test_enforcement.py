@@ -425,7 +425,7 @@ def test_reconcile_backs_off_until_protected_removal_succeeds(tmp_path, monkeypa
     apply = rig.fake._apply
 
     def apply_with_slow_failure(script):
-        if fail_cleanup and script.startswith("delete element"):
+        if fail_cleanup and any(line.startswith("delete element") for line in script.splitlines()):
             rig.clock.advance(3 * SECOND)
             raise NftError("removal failed")
         apply(script)
@@ -476,6 +476,43 @@ def test_a_failed_reconcile_is_logged_and_the_blocks_are_retried(tmp_path):
     rig.clock.advance(SECOND)
     again.engine.tick()
     assert again.live() == {AGENT: decision.expiry_ms}
+
+
+@pytest.mark.parametrize("drift", ["table_removed", "rules_removed"])
+def test_ticks_restore_saved_enforcement_after_backend_reset(tmp_path, drift):
+    state = tmp_path / "engine.json"
+    expiry = T0 + HOUR
+    engine.write_private(
+        state,
+        json.dumps(
+            {
+                "version": engine.STATE_VERSION,
+                "hits": {},
+                "blocks": {AGENT: [T0, expiry, HOUR, True]},
+                "history": {},
+                "alert_raised": None,
+            }
+        ).encode(),
+    )
+    rig = Rig(dry_run=False, state_path=state)
+    assert rig.live() == {AGENT: expiry}
+    rules = rig.fake.rules[:]
+    assert rules
+
+    if drift == "table_removed":
+        rig.fake.reboot()
+    else:
+        rig.fake.rules.clear()
+    calls = len(rig.fake.calls)
+    rig.clock.advance(MINUTE - 1)
+    rig.engine.tick()
+    assert len(rig.fake.calls) == calls
+    rig.clock.advance(1)
+    rig.engine.tick()
+
+    assert rig.engine.active_blocks() == {AGENT: expiry}
+    assert rig.live() == {AGENT: expiry}
+    assert rig.fake.rules == rules
 
 
 # -- the sweeper: apart from the service ----------------------------------------------------------
