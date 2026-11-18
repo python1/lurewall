@@ -246,7 +246,8 @@ def _lab_command(args: argparse.Namespace) -> int:
         return EXIT_USAGE
     if args.lab_command == "tamper":
         try:
-            copies = labcases.tamper_copies(args.log, args.work)
+            anchored, _ = verify.load_anchors(args.anchors, public_key)
+            copies = labcases.tamper_copies(args.log, args.work, anchored)
         except (OSError, ValueError) as exc:
             print(f"{name}: {exc}", file=sys.stderr)
             return EXIT_USAGE

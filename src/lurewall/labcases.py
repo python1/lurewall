@@ -20,7 +20,7 @@ import os
 import secrets
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -117,7 +117,7 @@ CASES: dict[int, Case] = {
             "Allowlisted address runs case 2",
             "scripted",
             "Alienware",
-            "decision allowlisted; no block and no would_block",
+            "would_block with reason allowlisted (logged, not enforced); no block",
             setup="Alienware (192.168.1.152) in the engine allowlist",
         ),
         Case(
@@ -482,8 +482,22 @@ def run_case(case: Case, ctx: Context) -> dict:
     return record
 
 
-def tamper_copies(log: Path, work: Path) -> dict[str, Path]:
-    """Case 6: four damaged copies of a log (edit, delete, reorder, truncate)."""
+def _seq(line: bytes) -> int | None:
+    try:
+        seq = json.loads(line).get("seq")
+    except (ValueError, AttributeError, RecursionError):
+        return None
+    return seq if isinstance(seq, int) else None
+
+
+def tamper_copies(log: Path, work: Path, anchored: Iterable[int] = ()) -> dict[str, Path]:
+    """Case 6: four damaged copies of a log (edit, delete, reorder, truncate).
+
+    The truncated copy ends just before the highest anchored entry in the log,
+    so the anchors prove entries are missing. Entries after the last anchor
+    cannot be shown missing by design; cutting only those would test nothing.
+    Without anchors it drops the last three entries.
+    """
     lines = log.read_bytes().splitlines(keepends=True)
     if len(lines) < 6:
         raise ValueError("the log needs at least 6 entries for the tamper test")
@@ -494,7 +508,10 @@ def tamper_copies(log: Path, work: Path) -> dict[str, Path]:
     deleted = lines[:middle] + lines[middle + 1 :]
     reordered = list(lines)
     reordered[middle], reordered[middle + 1] = reordered[middle + 1], reordered[middle]
-    truncated = lines[: max(1, len(lines) - 3)]
+    seqs = [_seq(line) for line in lines]
+    in_log = sorted(set(anchored) & {seq for seq in seqs if seq is not None})
+    cut = seqs.index(in_log[-1]) if in_log else len(lines) - 3
+    truncated = lines[: max(1, cut)]
     copies = {}
     for name, content in (
         ("edit", edited),

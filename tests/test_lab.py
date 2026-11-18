@@ -627,7 +627,36 @@ def test_the_tamper_command_catches_all_four(tmp_path, key, capsys):
     assert cli.main(argv) == cli.EXIT_OK
     out = capsys.readouterr().out
     assert "NOT CAUGHT" not in out
-    assert "truncated: 3 entries missing" in out
+    assert "truncated: 1 entries missing" in out  # the anchored last entry
+
+
+def test_the_truncated_copy_cuts_past_the_last_anchor(tmp_path, key, capsys):
+    # Entries after the last anchor can't be shown missing; the copy must cut deeper.
+    clock = FakeClock(T0)
+    log = tmp_path / "events.log"
+    checkpoint = tmp_path / "anchors" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    with EventLog(log, key, clock=clock, fsync=False, checkpoint_path=checkpoint) as events:
+        for n in range(12):
+            clock.advance(1000)
+            events.append("service_started", None, {"n": n})
+        events.checkpoint()
+        for n in range(5):  # an unanchored tail, as on a live log
+            clock.advance(1000)
+            events.append("service_started", None, {"n": n})
+    argv = ["lab", "tamper", "--log", str(log), "--pubkey", key.public_key_hex,
+            "--anchors", str(checkpoint.parent), "--work", str(tmp_path / "work")]  # fmt: skip
+    assert cli.main(argv) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "NOT CAUGHT" not in out
+    assert re.search(r"truncate\s+truncated: \d+ entries missing", out)
+
+
+def test_the_truncated_copy_without_anchors_drops_three(tmp_path):
+    log = tmp_path / "events.log"
+    log.write_bytes(b"".join(b'{"seq":%d}\n' % n for n in range(1, 11)))
+    copies = labcases.tamper_copies(log, tmp_path / "work")
+    assert copies["truncate"].read_bytes().count(b"\n") == 7
 
 
 def test_the_checkpoint_command_refuses_a_public_url(tmp_path, key, capsys):
