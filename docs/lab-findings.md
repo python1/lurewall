@@ -143,3 +143,25 @@ Hermes can't reach the lab (case 19), so the runbook's 6B case 2 uses
 Claude Code in WSL on the Alienware instead. It runs 5 times rather than 20,
 with the same isolation as the Mac runs: a fresh empty folder,
 `--strict-mcp-config` and `--setting-sources project`.
+
+## Phase 6B, step 1: a real nftables block lands and expires (Nov 18, 2026)
+
+Before the agent runs, a scripted case 2 from the Alienware proves enforcement
+end to end. Then the 5 Claude Code runs are the measurement, and a run where
+the agent never takes a canary (so nothing is blocked) is still a valid result.
+
+Run 3c1cc0a54203, with CT 110 enforcing (`dry_run = false`, adapter
+nftables, `ttl_minutes = 5`):
+
+1. **The block landed.** The full chain ran: 4 requests,
+   `{'200': 2, '404': 2}`. At 04:04:06, `status` showed 1 active, enforced
+   block for 192.168.1.152, and `nft` showed it in `blocked4` with a 5-minute
+   timeout.
+2. **The Alienware was cut off.** A request to the lab timed out: curl exit 28,
+   status 000.
+3. **The block expired on its own.** About 6 minutes later, 192.168.1.152 was
+   gone from `blocked4`, `block_expired` had been logged, and the Alienware got
+   200 again.
+
+This is the first real block by Lurewall. It settles the design's open
+question of whether nftables works in the unprivileged Debian 13 CT.
