@@ -88,7 +88,7 @@ class Classification:
     asset: bool  # a successful load of one of the site's assets
     browser_metadata: bool  # Sec-Fetch-Site says the browser made it for this site
     path: str | None  # the normalized, lowercased path, or None if nginx would refuse it
-    # The quiet canaries this response carried to the source (a page served whole).
+    # The quiet canaries this response body carried to the source.
     carries: tuple[str, ...] = ()
 
     @property
@@ -439,11 +439,12 @@ class Classifier:
             )
         )
         carries: tuple[str, ...] = ()
+        # The quiet carriers are in the response body, which HEAD omits.
         if (
             reason is None
             and canary is None
             and path is not None
-            and record.method in ("GET", "HEAD")
+            and record.method == "GET"
             and record.status == 200
         ):
             carries = self._carriers.get(path, ())

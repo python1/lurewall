@@ -253,6 +253,32 @@ def test_rotation_while_stopped_reads_the_rest_of_the_rotated_file(make_reader, 
     assert len(events(sink, "log_rotated")) == 1 and events(sink, "rotation_gap") == []
 
 
+@pytest.mark.parametrize("missing", [False, True])
+def test_restart_reads_intermediate_rotations(make_reader, access, sink, missing):
+    append(access, numbered(1, 1))
+    before = make_reader()
+    before.poll()
+    before.commit()
+    before.close()
+
+    append(access, numbered(2, 2))
+    rotate(access, ".3" if missing else ".2")
+    append(access, numbered(3, 3))
+    rotate(access)
+    append(access, numbered(4, 4))
+    if missing:
+        (access.parent / "2").write_bytes(numbered(99, 99))
+
+    after = make_reader()
+    seen = [uri for _ in range(4) for uri in uris(after.poll())]
+    assert seen == expect_uris(2, 4)
+    assert len(events(sink, "log_rotated")) == 2
+    gaps = [event.detail for event in events(sink, "rotation_gap")]
+    assert len(gaps) == int(missing)
+    if missing:
+        assert (gaps[0]["reason"], gaps[0]["missing"]) == ("numbered_rotation_unavailable", 1)
+
+
 def test_rotated_file_gone_is_a_logged_gap_not_a_silent_skip(make_reader, access, sink):
     append(access, numbered(1, 3))
     reader = make_reader()
@@ -517,6 +543,51 @@ def test_failure_budget_refills_each_window_and_close_flushes_the_count(
     reader.close()
     assert len(events(sink, "parse_failure")) == 4
     assert [e.detail["count"] for e in events(sink, "parse_failure_rollup")] == [3, 3]
+
+
+def test_committed_parse_failures_are_accounted_for_after_restart(
+    make_reader, access, sink, monkeypatch
+):
+    malformed = b"invalid log record"
+    append(access, malformed + b"\n")
+    before = make_reader(failure_detail_budget=0)
+    assert before.poll() == []
+    before.commit()
+    assert events(sink, "parse_failure_rollup") == []
+
+    # Simulate shutdown without allowing the in-memory summary to flush.
+    monkeypatch.setattr(before, "_flush_failures", lambda: None)
+    before.close()
+    after = make_reader(failure_detail_budget=0)
+    assert after.poll() == []
+    after.close()
+
+    (rollup,) = events(sink, "parse_failure_rollup")
+    assert rollup.detail["count"] == 1
+    assert rollup.detail["digest"] == sha256_hex(hashlib.sha256(malformed).digest())
+    assert rollup.detail["first_offset"] == rollup.detail["last_offset"] == 0
+    (first, last) = rollup.detail["first_inode"], rollup.detail["last_inode"]
+    assert first == last == access.stat().st_ino
+
+    make_reader().close()
+    assert len(events(sink, "parse_failure_rollup")) == 1
+
+
+def test_clean_close_preserves_the_cursor_and_does_not_republish_its_rollup(
+    make_reader, access, sink
+):
+    append(access, b"invalid log record\n")
+    before = make_reader(failure_detail_budget=0)
+    before.poll()
+    before.commit()
+    append(access, numbered(1, 1))
+    assert uris(before.poll()) == expect_uris(1, 1)
+    before.close()
+
+    after = make_reader(failure_detail_budget=0)
+    assert uris(after.poll()) == expect_uris(1, 1)
+    after.close()
+    assert len(events(sink, "parse_failure_rollup")) == 1
 
 
 # -- lag and staleness --------------------------------------------------------------

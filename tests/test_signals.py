@@ -11,7 +11,7 @@ import pytest
 import nginx_emu
 import sig
 from conftest import HOSTILE_STRINGS
-from lurewall import accesslog, signals
+from lurewall import accesslog, labsite, signals
 from lurewall.signals import (
     ATTACK,
     ATTACK_KINDS,
@@ -256,6 +256,19 @@ def test_verb_abuse_on_the_static_site(method):
 )
 def test_other_methods_are_not_verb_abuse(method):
     assert attack("/index.html", method=method) == []
+
+
+@pytest.mark.parametrize(
+    ("path", "canary_id"),
+    [
+        ("/", "footer_comment.quiet"),
+        ("/robots.txt", "robots_disallow.quiet"),
+        (labsite.SECURITY_TXT, "security_txt.quiet"),
+    ],
+)
+def test_a_head_response_does_not_prove_delivery_of_a_body_only_carrier(path, canary_id):
+    assert CLASSIFIER.classify(sig.rec(path, method="HEAD", status=200)).carries == ()
+    assert CLASSIFIER.classify(sig.rec(path, method="GET", status=200)).carries == (canary_id,)
 
 
 def test_all_abused_verbs_are_one_distinct_signal():

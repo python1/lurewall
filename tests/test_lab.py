@@ -485,10 +485,17 @@ def test_pull_stores_commits_and_pushes_only_when_asked(tmp_path, key):
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
     calls = []
+    scopes = {}
 
     def runner(argv, cwd):
         calls.append(argv)
-        return 0
+        for arg in argv:
+            if arg.startswith("--pathspec-from-file="):
+                scopes[argv[1]] = Path(arg.partition("=")[2]).read_bytes().split(b"\0")[:-1]
+                assert "--pathspec-file-nul" in argv
+        if argv[1] == "stamp":
+            Path(argv[-1] + ".ots").write_bytes(b"local proof fixture")
+        return int(argv[1] == "diff")
 
     result = anchorjob.pull(
         URL,
@@ -506,10 +513,11 @@ def test_pull_stores_commits_and_pushes_only_when_asked(tmp_path, key):
     )
     stored = repo / "checkpoints" / "000000000007.json"
     assert json.loads(stored.read_bytes())["seq"] == 7
-    assert calls == [
-        ["git", "add", "--", "checkpoints"],
-        ["git", "commit", "-q", "-m", "checkpoint 7"],
-    ]
+    receipt = str(stored.relative_to(repo))
+    assert [argv[1] for argv in calls] == ["add", "diff", "commit"]
+    assert calls[1] == ["git", "diff", "--cached", "--quiet", "--", receipt]
+    assert calls[2][:6] == ["git", "commit", "--only", "-q", "-m", "checkpoint 7"]
+    assert scopes == {"add": [receipt.encode()], "commit": [receipt.encode()]}
 
     calls.clear()
     result = anchorjob.pull(
@@ -523,11 +531,9 @@ def test_pull_stores_commits_and_pushes_only_when_asked(tmp_path, key):
         push=True,
     )
     assert result.stamped and result.pushed
-    assert calls[0] == [
-        "/usr/local/bin/ots",
-        "stamp",
-        str(repo / "checkpoints" / "000000000009.json"),
-    ]
+    assert calls[0][:2] == ["/usr/local/bin/ots", "stamp"]
+    assert Path(calls[0][-1]).name == "000000000009.json"
+    assert (stored.parent / "000000000009.json.ots").read_bytes() == b"local proof fixture"
     assert calls[-1] == ["git", "push", "-q"]
 
 
@@ -589,6 +595,140 @@ def test_pull_preserves_the_first_checkpoint_for_a_matching_head(tmp_path, key):
 
     assert pull(T0 + 1).status == "unchanged"
     assert saved.read_bytes() == original
+
+
+def test_pull_retries_a_requested_push_after_a_transient_failure(tmp_path, key):
+    (tmp_path / ".git").mkdir()
+    body = signed(key, 1)
+    commits = []
+    pushes = []
+
+    def runner(argv, _cwd):
+        if argv[1] == "diff":
+            return int(not commits)
+        if argv[1] == "commit":
+            commits.append(argv)
+        if argv[1] == "push":
+            pushes.append(argv)
+            return int(len(pushes) == 1)
+        return 0
+
+    def pull(*, push=True):
+        return anchorjob.pull(
+            URL,
+            key.public_key_hex,
+            tmp_path,
+            sender=checkpoint_sender(body),
+            run=runner,
+            git="git",
+            push=push,
+        )
+
+    first = pull()
+    assert first.committed and not first.pushed and not first.ok
+    assert first.status == "push_failed"
+    second = pull()
+    assert second.ok and second.pushed and not second.committed
+    assert second.status == "unchanged"
+    assert pull(push=False).ok
+    assert len(commits) == 1 and len(pushes) == 2
+
+
+@pytest.mark.parametrize(
+    ("stage", "status"), [("add", "stage_failed"), ("commit", "commit_failed")]
+)
+def test_pull_retries_local_git_work_without_replacing_the_receipt(tmp_path, key, stage, status):
+    (tmp_path / ".git").mkdir()
+    failures = []
+    calls = []
+
+    def runner(argv, _cwd):
+        calls.append(argv)
+        if argv[1] == stage and not failures:
+            failures.append(stage)
+            return 128
+        return int(argv[1] == "diff")
+
+    def pull():
+        return anchorjob.pull(
+            URL,
+            key.public_key_hex,
+            tmp_path,
+            sender=checkpoint_sender(signed(key, 1)),
+            run=runner,
+            git="git",
+        )
+
+    first = pull()
+    assert first.status == status and not first.ok and not first.committed
+    (receipt,) = (tmp_path / "checkpoints").glob("*.json")
+    content = receipt.read_bytes()
+    second = pull()
+    assert second.status == "unchanged" and second.committed and second.ok
+    assert receipt.read_bytes() == content
+    assert all("push" not in argv for argv in calls)
+
+
+def test_pull_retries_stamps_and_upgrades_existing_proofs_on_stable_head(tmp_path, key):
+    calls = []
+
+    def runner(argv, _cwd):
+        calls.append(argv[1])
+        if argv[1] == "stamp":
+            Path(argv[-1] + ".ots").write_bytes(b"local proof fixture")
+            if calls.count("stamp") == 1:
+                return 1
+        return 0
+
+    def pull():
+        return anchorjob.pull(
+            URL,
+            key.public_key_hex,
+            tmp_path,
+            sender=checkpoint_sender(signed(key, 1)),
+            run=runner,
+            ots="ots",
+        )
+
+    first = pull()
+    assert first.status == "stamp_failed" and not first.ok and not first.stamped
+    proof = tmp_path / "checkpoints" / "000000000001.json.ots"
+    assert not proof.exists()
+    proof.touch()  # an empty proof left by an older client
+    assert pull().stamped and pull().stamped
+    assert proof.read_bytes() == b"local proof fixture"
+    assert calls == ["stamp", "stamp", "upgrade", "upgrade"]
+
+
+def test_pull_limits_git_arguments_to_managed_paths_and_batches(tmp_path, key):
+    (tmp_path / ".git").mkdir()
+    directory = tmp_path / "checkpoints"
+    directory.mkdir()
+    for seq in range(1, 261):
+        (directory / f"{seq:012d}.json").write_bytes(signed(key, seq))
+    (directory / "operator-note.txt").touch()
+    diff_batches = []
+
+    def runner(argv, _cwd):
+        if argv[1] == "add":
+            scope = Path(argv[2].partition("=")[2]).read_bytes().split(b"\0")[:-1]
+            assert len(scope) == 261 and all(path.endswith(b".json") for path in scope)
+        elif argv[1] == "diff":
+            diff_batches.append(len(argv[5:]))
+        else:
+            pytest.fail(f"unnecessary Git command: {argv[1]}")
+        return 0
+
+    result = anchorjob.pull(
+        URL,
+        key.public_key_hex,
+        tmp_path,
+        sender=checkpoint_sender(signed(key, 261)),
+        run=runner,
+        git="git",
+    )
+    assert result.ok and not result.committed
+    assert diff_batches == [128, 128, 5]
 
 
 def test_pull_refuses_bad_checkpoints_and_bad_urls(tmp_path, key):

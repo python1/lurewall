@@ -214,6 +214,17 @@ def test_nginx_stamps_each_page_with_that_requests_id(lab):
     assert ID_RE.sub("ID", again) == ID_RE.sub("ID", text)
 
 
+def test_head_sends_the_stamped_header_without_quiet_carriers(lab):
+    ua = fresh_ua()
+    status, headers, body = lab.get("/", ua=ua, method="HEAD")
+    record = lab.record_for(ua)
+
+    assert status == 200 and body == b""
+    header = headers[lab.canary_set.header_name.lower()]
+    assert refs_in(lab, header) == {"response_header.instruction": record.request_id}
+    assert _classifier(lab).classify(record).carries == ()
+
+
 def test_every_placement_is_served_stamped_and_its_decoy_answers(lab):
     carried: dict[str, str] = {}
     for path, expected_status in (

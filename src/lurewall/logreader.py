@@ -16,7 +16,8 @@ byte it passes over:
 
 Delivery is at-least-once. ``poll`` returns records; the caller handles them
 and then calls ``commit``, which saves the offset. After a crash between the
-two, the same lines are read again rather than lost.
+two, the same lines are read again rather than lost. Pending failure roll-ups
+are saved with the offset and published when a reader resumes.
 
 The reader also reports its own lag behind the access log, and marks records
 older than the staleness limit so nothing downstream enforces on a backlog.
@@ -29,19 +30,21 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import itertools
 import json
 import os
 import stat
 import tempfile
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
 from lurewall import accesslog
 from lurewall.accesslog import MAX_LINE_BYTES, ParseFailure, Record
-from lurewall.canonical import sha256_hex
+from lurewall.canonical import MAX_INT, sha256_hex
+from lurewall.entry import is_hash
 
 DEFAULT_MAX_AGE_MS = 5 * 60 * 1000
 DEFAULT_MAX_BYTES_PER_POLL = 1024 * 1024
@@ -58,6 +61,7 @@ _STATE_VERSION = 1
 _MAX_STATE_BYTES = 4096
 _MAX_ROTATED_CANDIDATES = 10_000
 _OPEN_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+_ROLLUP_COUNTS = ("count", "first_inode", "first_offset", "last_inode", "last_offset")
 
 
 class Sink(Protocol):
@@ -86,6 +90,7 @@ class _Saved:
     offset: int
     head_len: int
     head_sha256: str
+    failure_rollup: dict | None = None
 
 
 def _now_ms() -> int:
@@ -167,6 +172,12 @@ class LogReader:
         self._closed = False
 
         self._saved = self._load_state()
+        self._committed = self._saved
+        if self._saved is not None and self._saved.failure_rollup is not None:
+            # The old process's digest is complete for its committed segment.
+            # Publish it separately so subsequent windows keep the same digest format.
+            self._sink.append("parse_failure_rollup", None, self._saved.failure_rollup)
+            self._clear_committed_rollup()
 
     # -- saved offset ---------------------------------------------------------
 
@@ -181,7 +192,11 @@ class LogReader:
             return None
         try:
             obj = json.loads(raw)
-            if type(obj) is not dict or obj.get("v") != _STATE_VERSION:
+            if (
+                len(raw) > _MAX_STATE_BYTES
+                or type(obj) is not dict
+                or obj.get("v") != _STATE_VERSION
+            ):
                 raise ValueError("version")
             saved = _Saved(
                 dev=obj["dev"],
@@ -189,6 +204,7 @@ class LogReader:
                 offset=obj["offset"],
                 head_len=obj["head_len"],
                 head_sha256=obj["head_sha256"],
+                failure_rollup=obj.get("failure_rollup"),
             )
             if not (
                 all(_is_count(v) for v in (saved.dev, saved.inode, saved.offset, saved.head_len))
@@ -196,6 +212,15 @@ class LogReader:
                 and type(saved.head_sha256) is str
             ):
                 raise ValueError("fields")
+            rollup = saved.failure_rollup
+            if rollup is not None and not (
+                type(rollup) is dict
+                and set(rollup) == {*_ROLLUP_COUNTS, "digest"}
+                and is_hash(rollup["digest"])
+                and all(_is_count(rollup[key]) and rollup[key] <= MAX_INT for key in _ROLLUP_COUNTS)
+                and rollup["count"] > 0
+            ):
+                raise ValueError("failure_rollup")
         except (ValueError, KeyError, RecursionError):
             # Starting again from the top re-reads lines; it never skips any.
             self._sink.append("reader_state_invalid", None, {"reason": "not_valid"})
@@ -211,15 +236,21 @@ class LogReader:
             return
         self._check_truncated()
         head_len = min(_HEAD_BYTES, self._line_start)
-        state = {
-            "v": _STATE_VERSION,
-            "dev": self._dev,
-            "inode": self._inode,
-            "offset": self._line_start,
-            "head_len": head_len,
-            "head_sha256": sha256_hex(os.pread(self._fd, head_len, 0)),
-        }
-        data = (json.dumps(state, sort_keys=True) + "\n").encode("ascii")
+        self._write_state(
+            _Saved(
+                self._dev,
+                self._inode,
+                self._line_start,
+                head_len,
+                sha256_hex(os.pread(self._fd, head_len, 0)),
+                self._failure_rollup(),
+            )
+        )
+
+    def _write_state(self, saved: _Saved) -> None:
+        data = (json.dumps({"v": _STATE_VERSION, **asdict(saved)}, sort_keys=True) + "\n").encode(
+            "ascii"
+        )
         fd, temp_name = tempfile.mkstemp(
             dir=self.state_path.parent, prefix=".reader-state-", suffix=".tmp"
         )
@@ -233,6 +264,13 @@ class LogReader:
             with contextlib.suppress(OSError):
                 os.unlink(temp_name)
             raise
+        self._committed = saved
+
+    def _clear_committed_rollup(self) -> None:
+        if self._committed is not None and self._committed.failure_rollup is not None:
+            # An interruption between the append and this write can replay the
+            # summary, just as it can replay records before their cursor is saved.
+            self._write_state(replace(self._committed, failure_rollup=None))
 
     # -- opening and rotation -------------------------------------------------
 
@@ -324,21 +362,76 @@ class LogReader:
                     continue
                 try:
                     info = item.stat(follow_symlinks=False)
-                    if (info.st_dev, info.st_ino) != (saved.dev, saved.inode):
-                        continue
-                    fd = os.open(item.path, _OPEN_FLAGS | os.O_NOFOLLOW)
                 except OSError:
                     continue
-                info = os.fstat(fd)
-                if (
-                    stat.S_ISREG(info.st_mode)
-                    and (info.st_dev, info.st_ino) == (saved.dev, saved.inode)
-                    and saved.offset <= info.st_size
-                    and self._head_matches(fd, saved)
-                ):
+                if (info.st_dev, info.st_ino) != (saved.dev, saved.inode):
+                    continue
+                opened = self._open_rotated(item.path, info)
+                if opened is None:
+                    continue
+                fd, info = opened
+                if saved.offset <= info.st_size and self._head_matches(fd, saved):
                     return fd, info
                 os.close(fd)
         return None
+
+    @staticmethod
+    def _open_rotated(path: str, expected: os.stat_result) -> tuple[int, os.stat_result] | None:
+        # A rotation may rename or replace the candidate between stat and open.
+        try:
+            fd = os.open(path, _OPEN_FLAGS | os.O_NOFOLLOW)
+        except OSError:
+            return None
+        try:
+            info = os.fstat(fd)
+        except OSError:
+            os.close(fd)
+            return None
+        if stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) == (
+            expected.st_dev,
+            expected.st_ino,
+        ):
+            return fd, info
+        os.close(fd)
+        return None
+
+    def _next_numbered_rotation(self) -> tuple[tuple[int, os.stat_result] | None, int]:
+        """Find the next retained uncompressed rotation and count intervening gaps."""
+        prefix = self.path.name + "."
+        candidates: dict[int, tuple[str, os.stat_result]] = {}
+        current = None
+        try:
+            with os.scandir(self.path.parent) as entries:
+                for item in itertools.islice(entries, _MAX_ROTATED_CANDIDATES):
+                    if not item.name.startswith(prefix):
+                        continue
+                    suffix = item.name.removeprefix(prefix)
+                    if not (suffix.isascii() and suffix.isdecimal() and not suffix.startswith("0")):
+                        continue
+                    try:
+                        info = item.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if not stat.S_ISREG(info.st_mode):
+                        continue
+                    number = int(suffix)
+                    if number > MAX_INT:
+                        continue
+                    if (info.st_dev, info.st_ino) == (self._dev, self._inode):
+                        current = number
+                    else:
+                        candidates[number] = (item.path, info)
+        except OSError:
+            return None, 0
+        if current is None:
+            return None, 0
+        for number in sorted(candidates, reverse=True):
+            if number >= current:
+                continue
+            opened = self._open_rotated(*candidates[number])
+            if opened is not None:
+                return opened, current - number - 1
+        return None, current - 1
 
     def _rotate_if_due(self, now: int) -> bool:
         """At end of file: has the path moved on to a new file? Returns True after a switch.
@@ -358,12 +451,28 @@ class LogReader:
         self._rotation_polls += 1
         if self._rotation_polls < 2:
             return False
-        old = {"old_inode": self._inode, "old_offset": self._line_start}
-        self._end_file(now)
-        opened = self._open_path(now)
+        opened, missing = self._next_numbered_rotation()
         if opened is None:
-            return True
-        self._attach(opened[0], opened[1], 0)
+            opened = self._open_path(now)
+        if opened is None:
+            return False
+        fd, info = opened
+        if (info.st_dev, info.st_ino) == (self._dev, self._inode):
+            os.close(fd)
+            return False
+        old = {"old_inode": self._inode, "old_offset": self._line_start}
+        try:
+            self._end_file(now)
+        except BaseException:
+            os.close(fd)
+            raise
+        self._attach(fd, info, 0)
+        if missing:
+            self._sink.append(
+                "rotation_gap",
+                None,
+                {**old, "reason": "numbered_rotation_unavailable", "missing": missing},
+            )
         self._sink.append("log_rotated", None, {**old, "new_inode": self._inode})
         return True
 
@@ -520,23 +629,26 @@ class LogReader:
         self._roll_count += 1
         self._roll_digest.update(bytes.fromhex(failure.line_sha256))
 
-    def _flush_failures(self) -> None:
+    def _failure_rollup(self) -> dict | None:
         if self._roll_count == 0:
-            return
+            return None
         first, last = self._roll_first, self._roll_last
-        self._sink.append(
-            "parse_failure_rollup",
-            None,
-            {
-                "count": self._roll_count,
-                "first_inode": first[0],
-                "first_offset": first[1],
-                "last_inode": last[0],
-                "last_offset": last[1],
-                # SHA-256 over the 32-byte hashes of the failed lines, in order.
-                "digest": self._roll_digest.hexdigest(),
-            },
-        )
+        return {
+            "count": self._roll_count,
+            "first_inode": first[0],
+            "first_offset": first[1],
+            "last_inode": last[0],
+            "last_offset": last[1],
+            # SHA-256 over the 32-byte hashes of the failed lines, in order.
+            "digest": self._roll_digest.hexdigest(),
+        }
+
+    def _flush_failures(self) -> None:
+        detail = self._failure_rollup()
+        if detail is None:
+            return
+        self._sink.append("parse_failure_rollup", None, detail)
+        self._clear_committed_rollup()
         self._roll_count = 0
         self._roll_first = self._roll_last = None
         self._roll_digest = hashlib.sha256()
