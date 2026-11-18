@@ -3,6 +3,7 @@
 
 import errno
 import json
+import logging
 import os
 import stat
 
@@ -537,6 +538,36 @@ def test_restart_does_not_lose_the_checkpoint_position(make_log, tmp_path):
     assert read_checkpoint(again, path)["seq"] == 3
     again.append("probe")
     assert read_checkpoint(again, path)["seq"] == 8
+
+
+@pytest.mark.parametrize("reason", ["missing", "unreadable", "invalid"])
+def test_unavailable_checkpoint_warns_and_keeps_logging(make_log, tmp_path, caplog, reason):
+    original = make_log()
+    first = original.append("probe")
+    original.close()
+    path = tmp_path / "checkpoint.json"
+    if reason == "unreadable":
+        path.mkdir()
+    elif reason == "invalid":
+        path.write_bytes(b"invalid checkpoint fixture")
+
+    again = make_log(checkpoint_path=path)
+
+    assert caplog.record_tuples == [
+        (
+            eventlog.__name__,
+            logging.WARNING,
+            f"startup checkpoint check skipped: configured file is {reason}",
+        )
+    ]
+    assert again.seq == first.seq
+    assert again.append("probe").prev_hash == first.hash
+    assert verify_log(again.path, again.public_key_hex).ok
+
+
+def test_unconfigured_checkpoint_needs_no_warning(make_log, caplog):
+    make_log()
+    assert caplog.record_tuples == []
 
 
 def test_restart_refuses_a_log_shorter_than_its_checkpoint(make_log, tmp_path):

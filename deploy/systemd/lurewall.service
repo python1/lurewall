@@ -25,6 +25,8 @@ ExecStart=/opt/lurewall/.venv/bin/lurewall run \
     --engine-state /var/lib/lurewall/engine.json \
     --checkpoint /srv/lurewall/checkpoint/checkpoint.json
 Restart=on-failure
+# Signed-log integrity failures need operator recovery.
+RestartPreventExitStatus=3
 RestartSec=5
 
 # nftables needs CAP_NET_ADMIN and nothing else. Without the nftables adapter

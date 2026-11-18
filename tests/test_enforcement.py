@@ -389,16 +389,19 @@ def test_log_only_decisions_are_never_installed_on_switch_to_nftables(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("policy", "source", "protected"),
-    [("allowlist", AGENT, "192.0.2.0/24"), ("log_only", "2001:db8::11", "2001:db8::22/128")],
+    ("policy", "source", "protected", "outcome"),
+    [
+        ("allowlist", AGENT, "192.0.2.0/24", engine.ALLOWLISTED),
+        ("log_only", "2001:db8::11", "2001:db8::22/128", engine.LOG_ONLY_RANGE),
+    ],
 )
 @pytest.mark.parametrize("live", [True, False])
 def test_startup_reconcile_honors_current_protected_ranges(
-    tmp_path, policy, source, protected, live
+    tmp_path, policy, source, protected, outcome, live
 ):
     state = tmp_path / "engine.json"
     rig = Rig(dry_run=False, state_path=state)
-    rig.attack(ip=source)
+    decision = rig.attack(ip=source)
     if not live:
         rig.fake.reboot()
 
@@ -408,25 +411,56 @@ def test_startup_reconcile_honors_current_protected_ranges(
     assert again.engine.active_blocks() == {}
     assert engine.read_status(state, rig.clock.now)["active_blocks"] == 0
     assert again.sink.of("block_restored") == []
+    ((_, removed, detail, _),) = again.sink.of("decision")
+    assert removed == decision.source
+    assert detail == {"outcome": outcome, "action": "remove_block", "expiry_ms": decision.expiry_ms}
 
 
-def test_reconcile_retries_protected_removal_after_backend_recovers(tmp_path):
+def test_reconcile_backs_off_until_protected_removal_succeeds(tmp_path, monkeypatch):
     state = tmp_path / "engine.json"
     rig = Rig(dry_run=False, state_path=state)
     decision = rig.attack()
-    rig.fake.fail = True
+    other = rig.attack(ip=OTHER)
+    fail_cleanup = True
+    apply = rig.fake._apply
+
+    def apply_with_slow_failure(script):
+        if fail_cleanup and script.startswith("delete element"):
+            rig.clock.advance(3 * SECOND)
+            raise NftError("removal failed")
+        apply(script)
+
+    monkeypatch.setattr(rig.fake, "_apply", apply_with_slow_failure)
 
     again = restart(rig, state, dry_run=False, allowlist=(ipaddress.ip_network(AGENT),))
     assert again.report is None
-    assert again.engine.active_blocks() == {AGENT: decision.expiry_ms}
-    assert engine.read_status(state, rig.clock.now)["active_blocks"] == 1
+    assert again.engine.active_blocks() == {AGENT: decision.expiry_ms, OTHER: other.expiry_ms}
+    assert engine.read_status(state, rig.clock.now)["active_blocks"] == 2
+    assert again.sink.of("decision") == []
 
-    rig.fake.fail = False
+    calls = len(rig.fake.calls)
+    for _ in range(3):
+        rig.clock.advance(SECOND // 4)
+        again.engine.tick()
+    assert len(rig.fake.calls) == calls
+    rig.clock.advance(SECOND // 4)
     again.engine.tick()
-    assert again.live() == {}
-    assert again.engine.active_blocks() == {}
-    assert engine.read_status(state, rig.clock.now)["active_blocks"] == 0
+    assert len(again.sink.of("enforcement_failed")) == 2
+    assert again.sink.of("decision") == []
+
+    fail_cleanup = False
+    calls = len(rig.fake.calls)
+    rig.clock.advance(2 * SECOND - 1)
+    again.engine.tick()
+    assert len(rig.fake.calls) == calls
+    rig.clock.advance(1)
+    again.engine.tick()
+
+    assert again.live() == {OTHER: other.expiry_ms}
+    assert again.engine.active_blocks() == {OTHER: other.expiry_ms}
+    assert engine.read_status(state, rig.clock.now)["active_blocks"] == 1
     assert again.sink.of("block_restored") == []
+    assert len(again.sink.of("decision")) == 1
 
 
 def test_a_failed_reconcile_is_logged_and_the_blocks_are_retried(tmp_path):
@@ -439,6 +473,7 @@ def test_a_failed_reconcile_is_logged_and_the_blocks_are_retried(tmp_path):
     assert again.report is None
     assert again.sink.of("enforcement_failed")[0][2]["action"] == "reconcile"
     again.fake.fail = False
+    rig.clock.advance(SECOND)
     again.engine.tick()
     assert again.live() == {AGENT: decision.expiry_ms}
 
@@ -764,6 +799,41 @@ def test_the_run_command_reports_log_only_without_dry_run(lab, capsys):
     assert "lurewall is running (log-only)" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    ("checkpoint_ahead", "message"),
+    [
+        (True, "published checkpoint is ahead of the log"),
+        (False, "published checkpoint disagrees with the log head"),
+    ],
+)
+def test_the_run_command_reports_checkpoint_mismatch(lab, capsys, checkpoint_ahead, message):
+    paths = lab()
+    signer = signing.EurekaSigner.load(paths.key)
+    with EventLog(paths.event_log, signer, checkpoint_path=paths.checkpoint, fsync=False) as log:
+        log.append("probe")
+        shorter = paths.event_log.read_bytes()
+        log.append("probe")
+    checkpoint = paths.checkpoint.read_bytes()
+    if checkpoint_ahead:
+        restored = shorter
+    else:
+        backup = lab.dir / "backup.log"
+        with EventLog(backup, signer, fsync=False) as log:
+            log.append("probe", detail={"fixture": "backup"})
+            log.append("probe")
+        restored = backup.read_bytes()
+    paths.event_log.write_bytes(restored)
+
+    argv = [*run_argv(paths), "--checkpoint", str(paths.checkpoint)]
+    assert cli.main(argv) == cli.EXIT_LOG_CORRUPT
+    output = capsys.readouterr()
+    assert not output.out
+    assert "signed log integrity check failed" in output.err
+    assert message in output.err and "lab runbook" in output.err
+    assert paths.event_log.read_bytes() == restored
+    assert paths.checkpoint.read_bytes() == checkpoint
+
+
 def test_two_services_cannot_share_one_log(lab):
     paths = lab("version = 1\n")
     paths.access_log.write_bytes(b"")
@@ -800,6 +870,13 @@ def test_the_units_run_unprivileged_with_only_the_capability_nftables_needs():
         assert "CapabilityBoundingSet=CAP_NET_ADMIN\n" in text
         assert "ProtectSystem=strict" in text
     assert "lurewall run" in unit("lurewall.service")
+
+
+def test_the_service_does_not_restart_after_a_signed_log_integrity_failure():
+    directives = unit("lurewall.service").splitlines()
+    assert "Restart=on-failure" in directives
+    assert f"RestartPreventExitStatus={cli.EXIT_LOG_CORRUPT}" in directives
+    assert cli.EXIT_LOG_CORRUPT not in (cli.EXIT_OK, cli.EXIT_FAIL, cli.EXIT_USAGE)
 
 
 def test_the_units_pass_every_option_the_commands_require():

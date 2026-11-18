@@ -325,6 +325,30 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 .venv/bin/lurewall lab list
 ```
 
+### Recovering after a signed-log rollback
+
+On exit status 3, the service stays stopped. Check the journal with
+`journalctl -u lurewall.service -n 20 --no-pager`. Preserve copies of the current
+log and checkpoint alongside any independently retained checkpoints before
+restoring anything.
+
+If an older backup was restored, find a copy of the log that covers the latest
+trusted checkpoint. If a crash with `fsync=False` lost log entries, look for a
+surviving copy of those entries. In either case, run
+`lurewall verify --log <candidate> --pubkey <key> --anchors <trusted-checkpoints>`
+with the published checkpoint and any independent anchors before restoring the
+verified log. Keep log fsync enabled, as in the shipped service.
+
+If no copy matches the trusted checkpoints, archive the old chain and document
+the evidence gap. Generate a new signing key with `lurewall keygen --key <new-key>`
+and configure a separate log, checkpoint destination, and anchor history. Update
+the checkpoint pull job to use the new destination and public key.
+Once recovery is complete, run `systemctl reset-failed lurewall.service` and
+`systemctl start lurewall.service`.
+
+A `startup checkpoint check skipped` warning means the service continued without
+that comparison. Check the configured file and verify against a retained checkpoint.
+
 ## Phase 6: the test cases
 
 Every run is recorded in a ledger on the machine that ran it

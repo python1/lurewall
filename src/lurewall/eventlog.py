@@ -26,6 +26,7 @@ import contextlib
 import errno
 import fcntl
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -49,6 +50,7 @@ MAX_ROLLUP_KEY_CHARS = 256
 
 _HOUSEKEEP_EVERY_MS = 1000
 _DISK_FULL_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT})
+_LOGGER = logging.getLogger(__name__)
 
 
 class LogCorruptError(RuntimeError):
@@ -224,9 +226,18 @@ class EventLog:
         try:
             with open(self._checkpoint_path, "rb") as handle:
                 raw = handle.read(MAX_LINE_BYTES + 1)
+            if len(raw) > MAX_LINE_BYTES:
+                raise ValueError("checkpoint file too large")
             checkpoint = entry_mod.check_checkpoint(json.loads(raw), self._public_key)
-        except (OSError, ValueError, RecursionError):
-            return  # missing or unusable: the next checkpoint replaces it
+        except FileNotFoundError:
+            _LOGGER.warning("startup checkpoint check skipped: configured file is missing")
+            return
+        except OSError:
+            _LOGGER.warning("startup checkpoint check skipped: configured file is unreadable")
+            return
+        except (ValueError, RecursionError):
+            _LOGGER.warning("startup checkpoint check skipped: configured file is invalid")
+            return
         seq = checkpoint["seq"]
         if seq > self._seq:
             raise LogCorruptError("published checkpoint is ahead of the log; refusing to append")

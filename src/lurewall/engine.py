@@ -58,6 +58,8 @@ STATE_VERSION = 1
 MAX_STATE_BYTES = 8 * 1024 * 1024
 MAX_HISTORY_SOURCES = 10_000
 _SAVE_INTERVAL_MS = 5_000
+_RECONCILE_INITIAL_RETRY_MS = 1_000
+_RECONCILE_MAX_RETRY_MS = 60_000
 
 # Outcomes a decision can have.
 CONTENT_READER = "content_reader"
@@ -170,7 +172,7 @@ class Engine:
         self._last_save = 0
         # Blocks decided but not yet in place because the adapter failed.
         self._pending: set[str] = set()
-        self._reconcile_pending = False
+        self._reconcile_retry: tuple[int, int] | None = None  # last attempt end, delay
         if self._state_path is not None:
             self._load()
 
@@ -216,7 +218,11 @@ class Engine:
         """Expire blocks that are due, retry failed ones, save state. Safe to call often."""
         now = self._clock() if now_ms is None else now_ms
         self._expire(now)
-        if self._reconcile_pending:
+        if self._reconcile_retry is not None:
+            last_attempt, delay = self._reconcile_retry
+            if 0 <= now - last_attempt < delay:
+                self._save(now)
+                return  # the per-source fallback uses the same adapter
             self._reconcile(now)
         for source in sorted(self._pending):
             block = self._blocks.get(source)
@@ -224,6 +230,10 @@ class Engine:
                 self._pending.discard(source)
             elif self._apply(source, block.expiry, retry=True):
                 self._sink.append("block_applied", source, {"expiry_ms": block.expiry})
+        if self._reconcile_retry is not None:
+            # Give the backend the full delay after per-source retries too.
+            _, delay = self._reconcile_retry
+            self._reconcile_retry = (max(now, self._clock()), delay)
         self._save(now)
 
     def start(self) -> ReconcileReport | None:
@@ -236,7 +246,11 @@ class Engine:
         return self._reconcile(now) if self._enforcing else None
 
     def _reconcile(self, now: int) -> ReconcileReport | None:
-        protected = {source for source in self._blocks if self._protected_reason(source)}
+        protected = {
+            source: reason
+            for source in self._blocks
+            if (reason := self._protected_reason(source)) is not None
+        }
         wanted = {
             source: block.expiry
             for source, block in self._blocks.items()
@@ -246,16 +260,24 @@ class Engine:
             report = self._adapter.reconcile(wanted)
         except Exception as exc:
             self._adapter_failed("reconcile", None, exc)
-            if not self._reconcile_pending:
+            if self._reconcile_retry is None:
                 # A single invalid saved block can make the whole adapter call
                 # fail. Give other wanted blocks their existing per-source retry.
                 self._pending.update(wanted)
-            self._reconcile_pending = True
+                delay = _RECONCILE_INITIAL_RETRY_MS
+            else:
+                delay = min(2 * self._reconcile_retry[1], _RECONCILE_MAX_RETRY_MS)
+            self._reconcile_retry = (max(now, self._clock()), delay)
             return None
-        self._reconcile_pending = False
+        self._reconcile_retry = None
         self._pending.difference_update(wanted, protected)
-        for source in protected:
-            del self._blocks[source]
+        for source, reason in protected.items():
+            block = self._blocks.pop(source)
+            self._sink.append(
+                "decision",
+                source,
+                {"outcome": reason, "action": "remove_block", "expiry_ms": block.expiry},
+            )
         if protected:
             self._dirty = True
             self._save(now, force=True)

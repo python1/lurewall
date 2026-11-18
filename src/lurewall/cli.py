@@ -13,6 +13,7 @@ from lurewall import __version__
 EXIT_OK = 0
 EXIT_FAIL = 1
 EXIT_USAGE = 2
+EXIT_LOG_CORRUPT = 3
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -102,7 +103,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="run the service: tail the access log, collect signals, decide",
         description=(
             "Dry-run unless the engine config says otherwise. On startup the enforcement "
-            "adapter is reconciled with the saved state."
+            "adapter is reconciled with the saved state. Exit status 3 means the signed log "
+            "failed its integrity check."
         ),
     )
     run.add_argument("--access-log", required=True, type=Path, help="nginx's JSON access log")
@@ -122,7 +124,8 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Reads expiry times from the live entries, so it works with the service stopped "
             "and its state lost. Writes to its own signed log, not the service's. "
-            "Exit status: 0 done, 1 nft failed, 2 the log or key could not be used."
+            "Exit status: 0 done, 1 nft failed, 2 the log or key could not be used, "
+            "3 the signed log failed its integrity check."
         ),
     )
     sweep.add_argument("--event-log", required=True, type=Path, help="the sweeper's signed log")
@@ -441,7 +444,7 @@ def _service_command(args: argparse.Namespace) -> int:
     import threading
 
     from lurewall import service
-    from lurewall.eventlog import LogLockedError
+    from lurewall.eventlog import LogCorruptError, LogLockedError
     from lurewall.signing import KeyFileError
 
     name = f"lurewall {args.command}"
@@ -464,6 +467,11 @@ def _service_command(args: argparse.Namespace) -> int:
                 checkpoint=args.checkpoint,
             )
         )
+    except LogCorruptError as exc:
+        print(f"{name}: signed log integrity check failed ({exc}).", file=sys.stderr)
+        if args.command == "run":
+            print("See the lab runbook for recovery before restarting Lurewall.", file=sys.stderr)
+        return EXIT_LOG_CORRUPT
     except (ValueError, OSError, KeyFileError, LogLockedError) as exc:
         # Config, canary and key errors are ValueErrors written by Lurewall.
         print(f"{name}: {exc}", file=sys.stderr)
