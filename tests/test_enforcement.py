@@ -740,3 +740,48 @@ def test_nothing_in_the_repository_could_be_mistaken_for_engine_state():
         [shutil.which("git"), "ls-files"], cwd=sig.REPO, capture_output=True, text=True, check=True
     ).stdout.split()
     assert not [name for name in tracked if name.endswith(("engine.json", ".key", "sweeper.log"))]
+
+
+def test_a_quiet_canary_through_the_service_blocks_once_bound_and_probed(lab):
+    paths = lab(ENFORCING)
+    clock = FakeClock(T0 + 10)
+    fake = FakeNft(clock)
+    b = next(c for c in lab.canaries.canaries if c.id == "footer_comment.quiet")
+    ip = "192.0.2.10"
+    paths.access_log.write_bytes(
+        b"".join(
+            [
+                nginx_emu.line(ts_ms=T0, ip=ip, uri=b"/"),
+                nginx_emu.line(
+                    ts_ms=T0 + 1, ip=ip, uri=b.path.rstrip("/").upper().encode(), status=404
+                ),
+                nginx_emu.line(ts_ms=T0 + 2, ip=ip, uri=b"/%2eenv", status=404),
+                nginx_emu.line(ts_ms=T0 + 3, ip=ip, uri=b"//.git/config", status=404),
+            ]
+        )
+    )
+    running = service.Service(paths, clock=clock, runner=fake, fsync=False)
+    running.step()
+    running.close()
+    assert set(fake.elements()) == {ip}
+    hit = next(e for e in entries(paths.event_log) if e["type"] == "canary_hit")
+    assert (hit["detail"]["family"], hit["detail"]["signal"]) == ("v2-quiet", "ai")
+
+
+def test_a_canary_that_collides_with_a_real_route_is_disabled_at_startup(lab, monkeypatch):
+    paths = lab()
+    b = next(c for c in lab.canaries.canaries if c.id == "footer_comment.quiet")
+    real = service.labsite.site_routes() | {b.path + "index.html"}
+    monkeypatch.setattr(service.labsite, "site_routes", lambda extra=None: real)
+    clock = FakeClock(T0 + 10)
+    paths.access_log.write_bytes(
+        nginx_emu.line(ts_ms=T0, ip="192.0.2.10", uri=b"/")
+        + nginx_emu.line(ts_ms=T0 + 1, ip="192.0.2.10", uri=b.path.encode(), status=404)
+    )
+    running = service.Service(paths, clock=clock, runner=FakeNft(clock), fsync=False)
+    running.step()
+    running.close()
+    seen = entries(paths.event_log)
+    disabled = [e["detail"] for e in seen if e["type"] == "canary_disabled_collision"]
+    assert disabled == [{"canary": "footer_comment.quiet"}]
+    assert "canary_hit" not in [e["type"] for e in seen]

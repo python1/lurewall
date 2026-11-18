@@ -6,7 +6,11 @@ A source is blocked only when two kinds of evidence agree:
 - a **counted canary hit** in the last 7 days: a decoy request, not
   cross-site, whose request ID was issued to the same source on a page nginx
   served it. An ID issued to another source is ``relayed`` and counts for
-  nobody; an ID never issued counts for nobody either;
+  nobody; an ID never issued counts for nobody either. A v2 quiet decoy
+  carries no ID: its hit counts only if the same source was served the page
+  that carries it (``served``) in the last 24 hours. Canary C (signal
+  ``research``) is logged with the decision ``research_log_only`` and never
+  counts;
 - the **attack threshold**: two or more distinct attack signals from at least
   two separate requests inside the window (kept by the signal tracker).
 
@@ -42,7 +46,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
-from lurewall.canaries import refuse_git_work_tree
+from lurewall.canaries import counts_toward_block, family_of, refuse_git_work_tree, signal_of
 from lurewall.collector import Observation
 from lurewall.engineconfig import EngineConfig, Network
 from lurewall.logreader import Sink
@@ -61,6 +65,7 @@ CONTENT_READER_CROSS_SITE = "content_reader_cross_site_probes_not_counted"
 ATTACK_NO_CANARY = "attack_no_canary"
 LOG_ONLY_RANGE = "log_only_range"
 ALLOWLISTED = "allowlisted"
+RESEARCH_LOG_ONLY = "research_log_only"
 CAP_REACHED = "cap_reached"
 WOULD_BLOCK = "would_block"
 BLOCK = "block"
@@ -152,6 +157,8 @@ class Engine:
         # request ID -> (source it was issued to, when)
         self._issued: OrderedDict[str, tuple[str, int]] = OrderedDict()
         self._issued_by: dict[str, deque[str]] = {}
+        # (source, quiet canary id) -> when the page carrying it was last served
+        self._served: OrderedDict[tuple[str, str], int] = OrderedDict()
         # source -> (when the counted hit was seen, canary id)
         self._hits: OrderedDict[str, tuple[int, str]] = OrderedDict()
         self._blocks: dict[str, _Block] = {}
@@ -185,6 +192,8 @@ class Engine:
             # Any page nginx served this source may carry canary references
             # stamped with this request's ID.
             self._issue(record.request_id, source, record.ts_ms)
+            for canary_id in result.carries:
+                self._serve(source, canary_id, record.ts_ms)
         elif result.cross_site is None:
             counted_now = self._canary_request(observation)
         # A cross-site decoy request counts for nothing; the collector logged it.
@@ -305,6 +314,26 @@ class Engine:
         self._issued[request_id] = (source, when)
         mine.append(request_id)
 
+    def _serve(self, source: str, canary_id: str, when: int) -> None:
+        key = (source, canary_id)
+        self._served[key] = when
+        self._served.move_to_end(key)
+        while len(self._served) > self.config.max_issued_ids:
+            self._served.popitem(last=False)
+            self._sink.append(
+                "engine_state_evicted", None, {"table": "served"}, rollup_key="served"
+            )
+
+    def _quiet_binding(self, source: str, canary_id: str, ts_ms: int) -> str | None:
+        """None if the quiet canary's page was served to this source recently, else why not."""
+        served = self._served.get((source, canary_id))
+        if served is None:
+            return "not_served"
+        age = ts_ms - served
+        if age < 0 or age > self.config.id_ttl_ms:
+            return "expired_served"
+        return None
+
     def _canary_request(self, observation: Observation) -> bool:
         """Log a same-site decoy request. Returns True if it is a counted hit."""
         record = observation.record
@@ -317,9 +346,14 @@ class Engine:
             "canary": canary.id,
             "lure": canary.lure,
             "placement": canary.placement,
+            "family": canary.family,
+            "signal": canary.signal,
         }
         if record.stale:
             detail["stale"] = True
+
+        if canary.quiet:
+            return self._quiet_request(observation, detail)
 
         if hit.request_id is None:
             self._sink.append(
@@ -348,13 +382,45 @@ class Engine:
             )
             return False
 
+        return self._count_hit(record, source, canary.id, detail)
+
+    def _quiet_request(self, observation: Observation, detail: dict) -> bool:
+        record = observation.record
+        source = observation.view.source
+        canary = observation.classification.canary.canary
+        if not counts_toward_block(canary.id):
+            # Canary C: researchers are invited to read security.txt. Logged, never counted.
+            self._sink.append(
+                "canary_hit", source, {**detail, "counted": False}, rollup_key=canary.id
+            )
+            self._sink.append(
+                "decision",
+                source,
+                {
+                    "request_id": record.request_id,
+                    "line": record.line_sha256,
+                    "outcome": RESEARCH_LOG_ONLY,
+                    "canary": canary.id,
+                },
+                rollup_key=RESEARCH_LOG_ONLY,
+            )
+            return False
+        why = self._quiet_binding(source, canary.id, record.ts_ms)
+        if why is not None:
+            # Guessed, relayed from another address, or read before a restart:
+            # nothing here can tell those apart, so none of them counts.
+            self._sink.append("canary_unbound", source, {**detail, "reason": why}, rollup_key=why)
+            return False
+        return self._count_hit(record, source, canary.id, detail)
+
+    def _count_hit(self, record, source: str, canary_id: str, detail: dict) -> bool:
         counted = not record.stale
         self._sink.append(
-            "canary_hit", source, {**detail, "counted": counted}, rollup_key=canary.id
+            "canary_hit", source, {**detail, "counted": counted}, rollup_key=canary_id
         )
         if not counted:
             return False
-        self._hits[source] = (record.ts_ms, canary.id)
+        self._hits[source] = (record.ts_ms, canary_id)
         self._hits.move_to_end(source)
         while len(self._hits) > self.config.max_hit_sources:
             self._hits.popitem(last=False)
@@ -441,6 +507,8 @@ class Engine:
             **where,
             "signals": signals,
             "canary": self._hits[source][1],
+            "canary_family": family_of(self._hits[source][1]),
+            "canary_signal": signal_of(self._hits[source][1]),
             "ttl_ms": ttl,
             "expiry_ms": expiry,
             "normal_browsing": view.normal_browsing,

@@ -338,12 +338,15 @@ def test_ipv6_binding_is_by_slash_64():
 
 def test_every_placement_and_both_lure_types_are_counted_and_labelled():
     rig = Rig()
-    for index in range(len(rig.canaries.canaries)):
-        rig.hit(canary=index)
+    for index, canary in enumerate(rig.canaries.canaries):
+        if not canary.quiet:
+            rig.hit(canary=index)
     events = rig.sink.of("canary_hit")
-    assert [event[2]["canary"] for event in events] == [c.id for c in rig.canaries.canaries]
+    v1 = [c.id for c in rig.canaries.canaries if not c.quiet]
+    assert [event[2]["canary"] for event in events] == v1
     assert {event[2]["lure"] for event in events} == {"instruction", "bait"}
     assert all(event[2]["placement"] for event in events)
+    assert {(e[2]["family"], e[2]["signal"]) for e in events} == {("v1-imperative", "ai")}
 
 
 def test_the_first_issue_of_an_id_wins():
@@ -992,3 +995,91 @@ def test_a_config_built_in_code_is_held_to_the_same_rules():
         engineconfig.load("/nonexistent/engine.toml")
     with pytest.raises(EngineConfigError, match="UTF-8"):
         engineconfig.parse(b"\xff")
+
+
+# -- v2 quiet canaries: bound by the page that carried them ----------------------------
+
+
+def quiet_index(rig, canary_id):
+    return next(i for i, c in enumerate(rig.canaries.canaries) if c.id == canary_id)
+
+
+def quiet_hit(rig, canary_id, carrier, *, served=True, ip=AGENT, method="GET", **kwargs):
+    if served:
+        rig.send(carrier, ip=ip)
+    canary = rig.canaries.canaries[quiet_index(rig, canary_id)]
+    return rig.send(canary.path, ip=ip, method=method, status=404, **kwargs)
+
+
+def test_canary_b_counts_after_its_page_was_served_and_blocks_with_probes():
+    rig = Rig()
+    assert outcome(quiet_hit(rig, "footer_comment.quiet", "/")) == engine.CONTENT_READER
+    hit = rig.sink.of("canary_hit")[-1][2]
+    assert (hit["family"], hit["signal"], hit["counted"]) == ("v2-quiet", "ai", True)
+    assert outcome(rig.probes()) == engine.WOULD_BLOCK
+    detail = rig.sink.of("would_block")[-1][2]
+    assert (detail["canary_family"], detail["canary_signal"]) == ("v2-quiet", "ai")
+
+
+def test_canary_a_counts_but_is_labelled_recon():
+    rig = Rig()
+    assert outcome(quiet_hit(rig, "robots_disallow.quiet", "/robots.txt")) == engine.CONTENT_READER
+    assert rig.sink.of("canary_hit")[-1][2]["signal"] == "recon"
+    assert outcome(rig.probes()) == engine.WOULD_BLOCK
+    assert rig.sink.of("would_block")[-1][2]["canary_signal"] == "recon"
+
+
+def test_canary_c_is_logged_and_never_counted():
+    rig = Rig()
+    assert quiet_hit(rig, "security_txt.quiet", "/.well-known/security.txt") is None
+    hit = rig.sink.of("canary_hit")[-1][2]
+    assert (hit["signal"], hit["counted"]) == ("research", False)
+    assert rig.outcomes()[-1] == engine.RESEARCH_LOG_ONLY
+    assert outcome(rig.probes()) != engine.WOULD_BLOCK  # probes alone never block
+
+
+def test_a_quiet_hit_without_its_page_counts_for_nobody():
+    rig = Rig()
+    assert quiet_hit(rig, "footer_comment.quiet", "/", served=False) is None
+    assert rig.sink.of("canary_unbound")[-1][2]["reason"] == "not_served"
+    # Served to one address, followed from another: still nothing.
+    rig.send("/", ip=AGENT)
+    assert quiet_hit(rig, "footer_comment.quiet", "/", served=False, ip=OTHER) is None
+    # The carrier of A does not bind B.
+    assert quiet_hit(rig, "footer_comment.quiet", "/robots.txt", ip=OTHER) is None
+    assert rig.sink.of("canary_hit") == []
+
+
+def test_a_quiet_binding_expires_after_the_id_ttl():
+    rig = Rig()
+    rig.send("/", ip=AGENT, at=0)
+    day = engineconfig.EngineConfig().id_ttl_ms
+    canary = rig.canaries.canaries[quiet_index(rig, "footer_comment.quiet")]
+    assert rig.send(canary.path, ip=AGENT, at=day + 1, status=404) is None
+    assert rig.sink.of("canary_unbound")[-1][2]["reason"] == "expired_served"
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "OPTIONS"])
+def test_a_quiet_decoy_counts_for_get_and_head_only(method):
+    rig = Rig()
+    assert quiet_hit(rig, "footer_comment.quiet", "/", method=method) is None
+    assert rig.sink.of("canary_hit") == []
+    rig2 = Rig()
+    assert outcome(quiet_hit(rig2, "footer_comment.quiet", "/", method="HEAD")) == (
+        engine.CONTENT_READER
+    )
+
+
+def test_a_cross_site_carrier_binds_nothing():
+    rig = Rig()
+    rig.send("/", ip=AGENT, sfs="cross-site", referer="https://evil.example/x.html")
+    canary = rig.canaries.canaries[quiet_index(rig, "footer_comment.quiet")]
+    assert rig.send(canary.path, ip=AGENT, status=404) is None
+    assert rig.sink.of("canary_hit") == []
+
+
+def test_the_served_table_is_bounded():
+    rig = Rig(max_issued_ids=3)
+    for n in range(5):
+        rig.send("/", ip=f"198.51.100.{n}")
+    assert any(e[2] == {"table": "served"} for e in rig.sink.of("engine_state_evicted"))

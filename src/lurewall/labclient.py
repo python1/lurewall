@@ -321,6 +321,11 @@ PATH_VARIANTS = (
     "//.git//config",
     "/.GIT/Config",
     "/%2egit/config",
+    "/.git%2fconfig",
+    "/..;/.env",
+    "/foo/..;/.git/HEAD",
+    "/.env/",
+    "/.env.",
 )
 
 # Hostile bytes in the path and user agent (test case 16). Nothing here can end

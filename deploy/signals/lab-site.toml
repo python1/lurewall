@@ -23,8 +23,9 @@ asset_extensions = ["css", "js", "png", "jpg", "svg", "ico", "woff2"]
 
 [attack_paths]
 # Matched on the URI as sent, on its normalized form (percent-decoded once,
-# slashes merged, dot segments resolved, lowercased), and on the path decoded
-# a second time (/%252eenv). Write rules in lowercase.
+# slashes merged, dot segments resolved, lowercased), on a lenient form (path
+# parameters such as /..;/ dropped, trailing dots removed: /.env. is /.env),
+# and on the path decoded a second time (/%252eenv). Write rules in lowercase.
 
 # The path equals the rule.
 exact = [
@@ -39,6 +40,13 @@ exact = [
     "/.env.local",
     "/.env.bak",
     "/.env.production",
+    "/.env~",
+    "/.env.save",
+    "/.env.example",
+    "/config.php.bak",
+    "/settings.py",
+    "/.npmrc",
+    "/.pypirc",
     "/.htpasswd",
     "/.htaccess",
     "/.ds_store",
@@ -64,13 +72,18 @@ tree = [
     "/.aws",
     "/.ssh",
     "/.vscode",
+    "/.docker",
+    "/_profiler",
     "/vendor/phpunit",
     "/solr",
     "/jenkins",
 ]
 
 # Any one segment of the path equals the rule, at any depth.
-segment = [".env", ".git", ".svn", ".hg"]
+segment = [".env", ".git", ".svn", ".hg", ".bzr"]
+
+# The last segment ends with the rule: editor swap files and old copies.
+suffix = [".swp", ".old"]
 
 [injection]
 # Pattern families matched in the path and query string.

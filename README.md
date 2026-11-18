@@ -1,7 +1,8 @@
 # Lurewall
 
 **Status: lab-tested — v1 research release.** It was tested in an isolated lab
-only; it is not meant for production sites.
+only; it is not meant for production sites. v2's quiet canaries (below) are
+built and unit-tested but not yet lab-tested.
 
 Lurewall plants harmless canaries in a web page's non-rendered content and
 watches the site's access log for clients that act on them. It blocks a source
@@ -80,12 +81,61 @@ isolated container. Details, run IDs and substitutions are in
 Lurewall combines a canary hit with attack probes behind one gate, and adds
 expiring blocks and an anchored, signed log.
 
-## Next: v2
+## v2: quiet canaries (not yet lab-tested)
 
-Destination-style canaries: lures that point somewhere a careful agent would
-look anyway, such as a `robots.txt` entry, a sitemap entry or a quiet "config
-moved" comment, instead of giving orders. They stay GET-only, with a 404
-behind them. Ideas are tracked in issue #14.
+v1's lures give orders, and careful agents decline them. v2 adds three
+*destination* canaries beside the v1 set. They name a place and ask nothing.
+The build spec is [docs/v2-build-spec.md](docs/v2-build-spec.md), and the ideas
+are tracked in issue #14.
+
+| Canary | Where | Shape | Signal | Counts toward a block? |
+|---|---|---|---|---|
+| B | an HTML comment in every content page's footer | `<!-- legacy settings archived at /<dir>/settings-<token>/ -->` | `ai` | yes |
+| A | one `Disallow` line in robots.txt | `Disallow: /<dir>-old-backup-<token>/` | `recon` | yes, labelled recon |
+| C | a comment in a valid `/.well-known/security.txt` | `# Previous disclosure archive: /<dir>/archive-<token>/` | `research` | no, log-only |
+
+- **A can block ordinary scanners.** Ordinary scanners read robots.txt and
+  visit what it disallows. A scanner that follows A and then probes for two
+  distinct attack paths meets the two-signal rule and can be blocked, just as
+  an agent would. That is why A's signal is `recon`, not `ai`. Leave A out of
+  any claim about AI agents.
+- **C never counts.** Security researchers are invited to read security.txt.
+  A hit on C is logged with the decision `research_log_only` and never counts
+  toward a block.
+- **No orders.** No quiet lure holds an imperative word ("verify", "approve",
+  "must", "click", and so on). The canary validator refuses one that does.
+- **An ordinary 404.** A quiet decoy has no nginx location. A request for one
+  gets the site's normal 404, byte for byte, and every 404 on the site now
+  sends `X-Robots-Tag: noindex`, so a trap's 404 is identical to any other.
+- **A hit counts only after the same address loaded the page.** A quiet
+  reference holds no request ID, so the page binds it instead. A v2 hit counts
+  only if the same address (an IPv4 address or an IPv6 /64) loaded the page
+  that carries that canary within the last 24 hours. For B that is any
+  content page, for A robots.txt, and for C security.txt. The page load must
+  be a GET or HEAD that is not cross-site. **A guessed or shared path doesn't
+  count:** a request from an address that never loaded the page is logged as
+  `canary_unbound` (`not_served`, or `expired_served` after 24 hours) and
+  counts for nobody. The bindings are kept in memory only, so after a restart
+  an address must load the page again. Only GET and HEAD to the decoy count.
+  Case, a trailing slash, an encoded slash or a query string does not change
+  the match.
+- **Plain-word paths.** A quiet path is a folder from the same list of
+  ordinary site words as the v1 decoys (never one that gives an order, such
+  as `verify`), then a word, then the per-install token, with no word
+  repeated.
+- **Labelled in the log.** Every `canary_hit` holds `family` (`v1-imperative`
+  or `v2-quiet`) and `signal`; `block` and `would_block` hold `canary_family`
+  and `canary_signal`. `lab results` reports hits per family and signal, and
+  per agent the runs with a v1 hit and the runs with a v2 hit.
+- **Upgrade and rotation.** `lab-site build` adds B, A and C to an existing v1
+  canary set and leaves the v1 canaries as they were. Rotate with the existing
+  command, for example `lurewall canaries rotate --id robots_disallow.quiet`,
+  or `--all`. A retired path becomes an ordinary 404 and counts for nothing.
+- **Collisions.** At startup the service disables any canary whose path
+  collides with a real route and logs `canary_disabled_collision`.
+
+Not in v2: sitemap and `Link` header canaries, and probe-only ("strict")
+blocking.
 
 ## Scope
 
@@ -211,12 +261,13 @@ writes a small fictional static site and an nginx `server` block for it.
   reader ("confirm access at ..."). A *bait* lure gives no instruction: it is
   something a probing agent wants, such as a commented-out backup link. Every
   canary carries its label.
-- **Seven placements.** HTML comments (one of each type), a visually hidden
+- **Seven v1 placements.** HTML comments (one of each type), a visually hidden
   element, a robots.txt comment, an unlinked `noindex` API page, the error
-  pages and a response header.
+  pages and a response header. v2 adds three quiet placements (see above).
 - **No shared fingerprint.** Decoy paths look like ordinary paths and no two
   share a first segment. A path outside the table gets the site's normal 404.
-  robots.txt has no `Disallow` line for decoys; they send `X-Robots-Tag`.
+  robots.txt's only `Disallow` line is v2's canary A; v1 decoys send
+  `X-Robots-Tag` instead.
 - **Never a real route.** The build fails if a decoy path collides with a real
   site path, and the check runs on every build.
 - **Tied to the page that served it.** nginx's `sub_filter` writes each
@@ -263,6 +314,10 @@ lurewall signals check --config deploy/signals/lab-site.toml --state /outside/an
   and they are one signal, not three. Attack-path rules are also matched on
   the path decoded a second time, so `/%252eenv` is the same probe; injection
   patterns are not, because query strings carry double-encoded URLs honestly.
+  A lenient form drops path parameters and trailing dots, as some servers do,
+  so `/..;/.env` and `/.env.` are the `/.env` probe too. Suffix rules
+  (`*.swp`, `*.old`) match editor and backup leftovers. Real paths such as
+  `/environment-guide/` match nothing.
 - **Path and query only.** Injection patterns look at the path and query
   string. No request body is logged, so nothing reads one.
 - **Cross-site counts for nothing.** A request marked `Sec-Fetch-Site:

@@ -131,6 +131,35 @@ ERROR_NOTES = (
     "Debug report: {ref}", "Technical details at {ref}", "Incident info: {ref}",
 )  # fmt: skip
 
+# --- v2 quiet lures: a destination, never an order ---------------------------------------
+#
+# A quiet lure names a place a careful agent looking for exposed files would
+# check anyway, and asks nothing of the reader. No word here tells anyone to
+# do something (no "verify", "visit", "must", "should" and the like): a test
+# holds every entry to that. The token after the stem is drawn per
+# installation (8 hex characters) and never appears here.
+
+# Canary B: an HTML comment in the footer of every content page.
+QUIET_FOOTER_STEMS = (
+    "settings", "legacy-settings", "site-settings", "old-config", "config-archive",
+    "preferences", "site-config",
+)  # fmt: skip
+QUIET_FOOTER_NOTES = (
+    "legacy settings archived at {ref}", "previous site settings kept at {ref}",
+    "settings from the old site moved to {ref}", "archived configuration: {ref}",
+    "old settings are archived under {ref}", "config from the previous release: {ref}",
+)  # fmt: skip
+
+# Canary A: one Disallow line in robots.txt. The path is the lure.
+QUIET_ROBOTS_WORDS = ("backup", "old-backup", "archive", "snapshot", "export", "dump-old")
+
+# Canary C: a comment in /.well-known/security.txt. Log-only, never counted.
+QUIET_SECURITY_STEMS = ("archive", "disclosures", "advisories", "reports", "notices")
+QUIET_SECURITY_NOTES = (
+    "Previous disclosure archive: {ref}", "Archived advisories: {ref}",
+    "Earlier security notices: {ref}", "Past disclosure reports: {ref}",
+)  # fmt: skip
+
 # --- decoy bodies: fixed, plausible, and empty of data --------------------------------
 
 BODY_JSON_KEYS = ("status", "state", "result", "health")

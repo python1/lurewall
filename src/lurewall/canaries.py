@@ -24,6 +24,24 @@ Design rules enforced here (see the design doc, Component A):
   never given site content, so it has nothing real to copy.
 * **Rotation only on leak.** Nothing here rotates on a schedule; an unchanged
   state file always yields the same canaries.
+
+Two families (v2):
+
+* **v1-imperative**, the seven v1 placements. They address the reader or
+  offer bait, and a hit counts only with a request ID issued to the same
+  source on the page that carried it.
+* **v2-quiet**, three destination-style canaries that name a place and ask
+  nothing: B, a comment in every content page's footer; A, one ``Disallow``
+  line in robots.txt; C, a comment in ``/.well-known/security.txt``. A quiet
+  decoy is not served at all: it gets the site's ordinary 404. A hit counts
+  only if the same source was served the page that carries it in the last 24
+  hours, and only for GET and HEAD.
+
+Each canary has a ``signal``: ``ai`` (every v1 canary, and B), ``recon`` (A:
+ordinary scanners read robots.txt too, so a scanner that follows A and then
+probes can be blocked) and ``research`` (C: honest researchers are invited to
+read security.txt, so a hit is logged and never counted). Family and signal
+follow from the canary's id, so a v1 state file loads unchanged.
 """
 
 from __future__ import annotations
@@ -46,6 +64,14 @@ STATE_VERSION = 1
 
 INSTRUCTION = "instruction"
 BAIT = "bait"
+DESTINATION = "destination"  # v2: names a place, asks nothing
+
+V1_IMPERATIVE = "v1-imperative"
+V2_QUIET = "v2-quiet"
+
+AI = "ai"
+RECON = "recon"
+RESEARCH = "research"  # logged, never counted toward a block
 
 # The v1 placements: id -> (where it goes, lure type). The id names the lure
 # that worked when a hit is looked up.
@@ -58,6 +84,49 @@ PLACEMENTS: dict[str, tuple[str, str]] = {
     "error_page.bait": ("error_page", BAIT),
     "response_header.instruction": ("response_header", INSTRUCTION),
 }
+
+# The v2 quiet placements, with the letter the build spec uses for each.
+QUIET_PLACEMENTS: dict[str, tuple[str, str]] = {
+    "footer_comment.quiet": ("footer_comment", DESTINATION),  # B
+    "robots_disallow.quiet": ("robots_disallow", DESTINATION),  # A
+    "security_txt.quiet": ("security_txt", DESTINATION),  # C
+}
+QUIET_LETTERS = {
+    "footer_comment.quiet": "B",
+    "robots_disallow.quiet": "A",
+    "security_txt.quiet": "C",
+}
+ALL_PLACEMENTS: dict[str, tuple[str, str]] = {**PLACEMENTS, **QUIET_PLACEMENTS}
+
+_SIGNALS = {
+    **dict.fromkeys(PLACEMENTS, AI),
+    "footer_comment.quiet": AI,
+    "robots_disallow.quiet": RECON,
+    "security_txt.quiet": RESEARCH,
+}
+
+# Words no quiet lure may hold: a quiet canary names a place and gives no order.
+IMPERATIVE_WORDS = frozenset(
+    {
+        "verify", "approve", "must", "click", "should", "please", "confirm", "visit",
+        "request", "fetch", "load", "open", "follow", "check", "validate", "register",
+        "call", "retrieve", "acknowledge", "agents", "bots", "crawlers", "ai",
+    }
+)  # fmt: skip
+
+
+def family_of(canary_id: str) -> str:
+    return V2_QUIET if canary_id in QUIET_PLACEMENTS else V1_IMPERATIVE
+
+
+def signal_of(canary_id: str) -> str:
+    """``ai``, ``recon`` or ``research``. Unknown ids (an old log) read as ``ai``."""
+    return _SIGNALS.get(canary_id, AI)
+
+
+def counts_toward_block(canary_id: str) -> bool:
+    return signal_of(canary_id) != RESEARCH
+
 
 # Marks the shipped example. It can never pass the path rules, and the loader
 # also names it, so a copied example fails with a clear message.
@@ -91,6 +160,10 @@ MAX_BODY_BYTES = 512
 _REQUEST_ID_RE = re.compile(r"[0-9a-f]{32}", re.ASCII)
 _PLACEHOLDER_RE = _REQUEST_ID_RE
 _PATH_RE = re.compile(r"(?:/[a-z0-9][a-z0-9._-]{0,63}){2,5}", re.ASCII)
+# A quiet decoy is a directory whose last segment ends in the per-install token.
+_QUIET_PATH_RE = re.compile(
+    r"(?:/[a-z0-9][a-z0-9._-]{0,63}){0,2}/[a-z0-9][a-z0-9-]{0,40}-[0-9a-f]{8,16}/", re.ASCII
+)
 _PARAM_RE = re.compile(r"[a-z]{1,8}", re.ASCII)
 _HEADER_RE = re.compile(r"X-[A-Z][a-z]{1,15}-[A-Z][a-z]{1,15}", re.ASCII)
 _CLASS_RE = re.compile(r"[a-z][a-z-]{2,31}", re.ASCII)
@@ -121,8 +194,26 @@ class Canary:
     body: str  # the fixed decoy body
     content_type: str
 
+    @property
+    def family(self) -> str:
+        return family_of(self.id)
+
+    @property
+    def signal(self) -> str:
+        return signal_of(self.id)
+
+    @property
+    def quiet(self) -> bool:
+        return self.id in QUIET_PLACEMENTS
+
     def reference(self, request_id: str) -> str:
-        """The canary reference as it appears on a page: path plus the request ID."""
+        """The canary reference as it appears on a page.
+
+        A v1 reference is the path plus the request ID. A quiet one is the bare
+        path: it is bound by the page that served it, not by an ID in the URL.
+        """
+        if self.quiet:
+            return self.path
         return f"{self.path}?{self.param}={request_id}"
 
 
@@ -149,10 +240,23 @@ class CanarySet:
                 return canary
         raise KeyError(canary_id)
 
+    @property
+    def has_quiet(self) -> bool:
+        return any(canary.quiet for canary in self.canaries)
+
     def lookup_path(self, path: str) -> Canary | None:
-        """The canary a decoy path belongs to, or None. Exact match only."""
+        """The canary a decoy path belongs to, or None.
+
+        A v1 decoy is matched exactly, as nginx matches its ``location =``. A
+        quiet decoy is never served, so any spelling that reaches the same
+        place counts: case, a trailing slash or none.
+        """
         for canary in self.canaries:
-            if canary.path == path:
+            if not canary.quiet and canary.path == path:
+                return canary
+        loose = path.lower().rstrip("/")
+        for canary in self.canaries:
+            if canary.quiet and canary.path.rstrip("/") == loose:
                 return canary
         return None
 
@@ -178,7 +282,7 @@ class CanarySet:
         return CanaryHit(canary=canary, request_id=request_id)
 
     def lure_counts(self) -> dict[str, int]:
-        counts = {INSTRUCTION: 0, BAIT: 0}
+        counts = {INSTRUCTION: 0, BAIT: 0, DESTINATION: 0}
         for canary in self.canaries:
             counts[canary.lure] += 1
         return counts
@@ -265,12 +369,15 @@ def _validate_canary(canary: Canary, placeholder: str) -> None:
     def bad(what: str) -> CanaryError:
         return CanaryError(f"canary {canary.id!r}: {what}")
 
-    if canary.id not in PLACEMENTS:
+    if canary.id not in ALL_PLACEMENTS:
         raise CanaryError("unknown canary id")
-    if (canary.placement, canary.lure) != PLACEMENTS[canary.id]:
+    if (canary.placement, canary.lure) != ALL_PLACEMENTS[canary.id]:
         raise bad("placement or lure type does not match its id")
     if EXAMPLE_MARKER.lower() in canary.path.lower():
         raise bad("this is the shipped example, not a real canary. Generate your own.")
+    if canary.quiet:
+        _validate_quiet(canary, bad)
+        return
     if _PATH_RE.fullmatch(canary.path) is None or "--" in canary.path or ".." in canary.path:
         raise bad("decoy path is not in the allowed form")
     segments = canary.path.strip("/").split("/")
@@ -295,6 +402,30 @@ def _validate_canary(canary: Canary, placeholder: str) -> None:
         raise bad("decoy body must not hold a request ID or a decoy path")
 
 
+def _validate_quiet(canary: Canary, bad) -> None:
+    if _QUIET_PATH_RE.fullmatch(canary.path) is None or "--" in canary.path:
+        raise bad("decoy path is not in the allowed form")
+    segments = canary.path.strip("/").split("/")
+    if any(segment in RESERVED_SEGMENTS or segment.startswith(".") for segment in segments):
+        raise bad("decoy path contains a reserved (attack-path) name")
+    named = [w for w in re.findall(r"[a-z]+", canary.path.rsplit("-", 1)[0]) if len(w) > 1]
+    if set(named) & IMPERATIVE_WORDS:
+        raise bad("a quiet decoy path may not hold a word that gives an order")
+    if len(set(named)) != len(named):
+        raise bad("a quiet decoy path repeats a word")
+    if canary.param or canary.body or canary.content_type or canary.form != "plain":
+        raise bad("a quiet canary has no query key, body or content type, and plain text")
+    if _TEXT_RE.fullmatch(canary.text) is None or "--" in canary.text:
+        raise bad("lure text is not in the allowed form")
+    if canary.text.count(_REF) != 1 or canary.text.replace(_REF, "").count("{"):
+        raise bad("lure text must hold exactly one {ref}")
+    if "}" in canary.text.replace(_REF, ""):
+        raise bad("lure text holds a stray brace")
+    words = set(re.findall(r"[a-z]+", canary.text.replace(_REF, "").lower()))
+    if words & IMPERATIVE_WORDS:
+        raise bad("a quiet lure names a place; it may not tell the reader to do anything")
+
+
 def validate(canary_set: CanarySet) -> None:
     """Raise CanaryError unless the set is safe to build a site and an nginx config from.
 
@@ -313,9 +444,12 @@ def validate(canary_set: CanarySet) -> None:
         raise CanaryError("header name is a real header; the canary header must be made up")
     if _CLASS_RE.fullmatch(canary_set.hidden_class) is None:
         raise CanaryError("hidden class name is not in the allowed form")
-    ids = [canary.id for canary in canary_set.canaries]
-    if sorted(ids) != sorted(PLACEMENTS):
-        raise CanaryError("the set must hold exactly one canary per placement")
+    ids = sorted(canary.id for canary in canary_set.canaries)
+    if ids not in (sorted(PLACEMENTS), sorted(ALL_PLACEMENTS)):
+        raise CanaryError(
+            "the set must hold exactly one canary per v1 placement, and either none or "
+            "all of the v2 quiet placements"
+        )
     for canary in canary_set.canaries:
         _validate_canary(canary, canary_set.placeholder)
     paths = [canary.path for canary in canary_set.canaries]
@@ -361,6 +495,45 @@ def _tail(canary_id: str, rng: Any) -> str:
     return f"{rng.choice(bank.VERIFY)}-{first}-{number}"  # response_header.instruction
 
 
+def _token(rng: Any) -> str:
+    return f"{rng.getrandbits(32):08x}"
+
+
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z]+", text.lower()))
+
+
+def _quiet_directory_ok(directory: str) -> bool:
+    """A quiet path's first folder is a plain word: never one that gives an order."""
+    return not _words(directory) & IMPERATIVE_WORDS
+
+
+def _quiet_path(canary_id: str, directory: str, rng: Any) -> str:
+    # The word after the folder never repeats it: no "/backup-old-backup-...".
+    if canary_id == "footer_comment.quiet":
+        bank_words, joiner = bank.QUIET_FOOTER_STEMS, "/"
+    elif canary_id == "robots_disallow.quiet":
+        bank_words, joiner = bank.QUIET_ROBOTS_WORDS, "-"
+    else:
+        bank_words, joiner = bank.QUIET_SECURITY_STEMS, "/"
+    fresh = [word for word in bank_words if not _words(word) & _words(directory)]
+    return f"/{directory}{joiner}{rng.choice(fresh)}-{_token(rng)}/"
+
+
+def _assign_directories(ids: Iterable[str], directories: list[str], rng: Any) -> dict[str, str]:
+    """One unused first folder per canary; a quiet canary only gets a plain word."""
+    pool = list(directories)
+    chosen: dict[str, str] = {}
+    # Quiet canaries pick first: they have the narrower list.
+    for canary_id in sorted(ids, key=lambda i: i not in QUIET_PLACEMENTS):
+        options = [d for d in pool if canary_id not in QUIET_PLACEMENTS or _quiet_directory_ok(d)]
+        if not options:
+            raise CanaryError("no unused top-level names left for the canaries")
+        chosen[canary_id] = rng.choice(options)
+        pool.remove(chosen[canary_id])
+    return chosen
+
+
 def path_space(canary_id: str) -> int:
     """How many different paths the generator can produce for one placement.
 
@@ -369,6 +542,14 @@ def path_space(canary_id: str) -> int:
     binding, not secrecy of the path alone.
     """
     generic, number, dirs = len(bank.GENERIC), 4094, len(bank.DIRS)
+    token = 16**8
+    quiet = {
+        "footer_comment.quiet": len(bank.QUIET_FOOTER_STEMS) * token,
+        "robots_disallow.quiet": len(bank.QUIET_ROBOTS_WORDS) * token,
+        "security_txt.quiet": len(bank.QUIET_SECURITY_STEMS) * token,
+    }
+    if canary_id in quiet:
+        return dirs * quiet[canary_id]
     tails = {
         "html_comment.instruction": len(bank.VERIFY) * generic * generic * number,
         "html_comment.bait": generic
@@ -392,6 +573,12 @@ def _instruction_text(rng: Any) -> str:
 
 def _wording(canary_id: str, rng: Any) -> tuple[str, str]:
     """(text, form) for a placement."""
+    if canary_id == "footer_comment.quiet":
+        return rng.choice(bank.QUIET_FOOTER_NOTES), "plain"
+    if canary_id == "robots_disallow.quiet":
+        return f"Disallow: {_REF}", "plain"
+    if canary_id == "security_txt.quiet":
+        return rng.choice(bank.QUIET_SECURITY_NOTES), "plain"
     if canary_id in ("html_comment.instruction", "hidden_element.instruction"):
         return _instruction_text(rng), "plain"
     if canary_id == "html_comment.bait":
@@ -422,17 +609,21 @@ def _body(canary_id: str, rng: Any) -> tuple[str, str]:
 
 
 def _make_canary(canary_id: str, directory: str, real_paths: frozenset[str], rng: Any) -> Canary:
-    placement, lure = PLACEMENTS[canary_id]
+    placement, lure = ALL_PLACEMENTS[canary_id]
+    quiet = canary_id in QUIET_PLACEMENTS
     text, form = _wording(canary_id, rng)
-    body, content_type = _body(canary_id, rng)
+    body, content_type = ("", "") if quiet else _body(canary_id, rng)
     for _ in range(200):
-        path = f"/{directory}/{_tail(canary_id, rng)}"
+        if quiet:
+            path = _quiet_path(canary_id, directory, rng)
+        else:
+            path = f"/{directory}/{_tail(canary_id, rng)}"
         candidate = Canary(
             id=canary_id,
             placement=placement,
             lure=lure,
             path=path,
-            param=rng.choice(bank.ID_PARAMS),
+            param="" if quiet else rng.choice(bank.ID_PARAMS),
             text=text,
             form=form,
             body=body,
@@ -448,24 +639,41 @@ def _free_directories(real_paths: Iterable[str], taken: Iterable[str]) -> list[s
     """First segments a new decoy may use: not a real top-level name, not already a decoy's."""
     used = {collision_key(path).split("/")[1] for path in real_paths if collision_key(path) != "/"}
     used.update(taken)
-    return [name for name in bank.DIRS if name not in used and name not in RESERVED_SEGMENTS]
+    # Canary A's first segment is "<folder>-<word>-<token>": its folder is taken too.
+    return [
+        name
+        for name in bank.DIRS
+        if name not in used
+        and name not in RESERVED_SEGMENTS
+        and not any(t.startswith(name + "-") and _ends_in_token(t) for t in used)
+    ]
 
 
-def generate(real_paths: Iterable[str], *, rng: Any = None, now_ms: int | None = None) -> CanarySet:
+def _ends_in_token(segment: str) -> bool:
+    return re.fullmatch(r".+-[0-9a-f]{8,16}", segment) is not None
+
+
+def generate(
+    real_paths: Iterable[str],
+    *,
+    rng: Any = None,
+    now_ms: int | None = None,
+    quiet: bool = True,
+) -> CanarySet:
     """Draw a fresh canary set for a site whose real routes are ``real_paths``.
 
     ``rng`` defaults to the operating system's secure source. Tests pass a
-    seeded ``random.Random``.
+    seeded ``random.Random``. ``quiet=False`` draws the v1 placements only.
     """
     rng = secrets.SystemRandom() if rng is None else rng
     real = frozenset(real_paths)
+    placements = ALL_PLACEMENTS if quiet else PLACEMENTS
     directories = _free_directories(real, ())
-    if len(directories) < len(PLACEMENTS):
+    if len(directories) < len(placements):
         raise CanaryError("the site uses too many of the generator's top-level names")
-    chosen = rng.sample(directories, len(PLACEMENTS))
+    chosen = _assign_directories(placements, directories, rng)
     canaries = tuple(
-        _make_canary(canary_id, directory, real, rng)
-        for canary_id, directory in zip(PLACEMENTS, chosen, strict=True)
+        _make_canary(canary_id, chosen[canary_id], real, rng) for canary_id in placements
     )
     canary_set = CanarySet(
         version=STATE_VERSION,
@@ -480,13 +688,33 @@ def generate(real_paths: Iterable[str], *, rng: Any = None, now_ms: int | None =
     return canary_set
 
 
+def add_quiet(canary_set: CanarySet, real_paths: Iterable[str], *, rng: Any = None) -> CanarySet:
+    """Add the v2 quiet canaries to a v1-only set. The v1 canaries are left exactly as they are."""
+    if canary_set.has_quiet:
+        return canary_set
+    rng = secrets.SystemRandom() if rng is None else rng
+    real = frozenset(real_paths)
+    kept_firsts = [c.path.split("/")[1] for c in canary_set.canaries]
+    directories = _free_directories(real, kept_firsts)
+    if len(directories) < len(QUIET_PLACEMENTS):
+        raise CanaryError("no unused top-level names left for the quiet canaries")
+    chosen = _assign_directories(QUIET_PLACEMENTS, directories, rng)
+    quiet = tuple(
+        _make_canary(canary_id, chosen[canary_id], real, rng) for canary_id in QUIET_PLACEMENTS
+    )
+    upgraded = replace(canary_set, canaries=canary_set.canaries + quiet)
+    validate(upgraded)
+    check_collisions(upgraded, real)
+    return upgraded
+
+
 def rotate(
     canary_set: CanarySet, ids: Iterable[str], real_paths: Iterable[str], *, rng: Any = None
 ) -> CanarySet:
     """Replace the named canaries after a suspected leak. The rest are left exactly as they are."""
     rng = secrets.SystemRandom() if rng is None else rng
     wanted = set(ids)
-    unknown = wanted - set(PLACEMENTS)
+    unknown = wanted - {canary.id for canary in canary_set.canaries}
     if unknown:
         raise CanaryError(f"unknown canary id: {sorted(unknown)[0]}")
     real = frozenset(real_paths)
@@ -494,9 +722,9 @@ def rotate(
     directories = _free_directories(real, kept_firsts)
     if len(directories) < len(wanted):
         raise CanaryError("no unused top-level names left to rotate into")
-    fresh = iter(rng.sample(directories, len(wanted)))
+    fresh = _assign_directories(sorted(wanted), directories, rng)
     canaries = tuple(
-        _make_canary(c.id, next(fresh), real, rng) if c.id in wanted else c
+        _make_canary(c.id, fresh[c.id], real, rng) if c.id in wanted else c
         for c in canary_set.canaries
     )
     rotated = replace(canary_set, canaries=canaries)

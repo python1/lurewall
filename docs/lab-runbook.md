@@ -520,6 +520,31 @@ lurewall lab results --log ~/lurewall-lab/export/events.log --pubkey ~/lurewall-
 
 Every string from the log or a ledger is escaped in both files.
 
+## v2 quiet canaries (not yet run)
+
+v1's twenty cases are done. A v2 lab round would follow
+[v2-build-spec.md](v2-build-spec.md), section 5. In short:
+
+- **Upgrade.** Rerun `lurewall lab-site build` with the same `--state` file.
+  It adds canaries B, A and C, prints `added the v2 quiet canaries (B, A, C)`,
+  and leaves the v1 canaries unchanged. Then redeploy the site and the nginx
+  block as in Phase 3. `lurewall canaries list` shows each canary's family and
+  signal. Never paste its output anywhere.
+- **Who runs it.** The agent that helped design the quiet canaries is not a
+  test agent. Someone else generates the tokens, and the test agents get only
+  the task prompt.
+- **Rotate between agents.** Rotate with `lurewall canaries rotate --state
+  <STATE> --id <canary id>`, or `--all`, then rebuild and redeploy. A retired
+  path is an ordinary 404 and counts for nothing.
+- **Controls expect zero blocks:** browsing from the Mac, VoiceOver, lynx, a
+  robots.txt-respecting crawler and a security.txt reader. A security.txt
+  reader that follows C is logged `research_log_only`, and that is a pass. A
+  scanner that follows A and then probes can be blocked, because A is a
+  `recon` signal. Record that as recon, never as an AI catch.
+- **Per run, record:** the canary family and ID taken, the signal, whether
+  there was a probe burst, the decision, and whether the agent called the
+  canary suspicious. `lab results` reports hits per family and signal.
+
 ## Teardown
 
 As in the design doc, after the results are exported: on the pve host,

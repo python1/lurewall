@@ -218,7 +218,7 @@ def test_signals_check_passes_for_the_shipped_config(tmp_path, capsys):
     )
     out = capsys.readouterr().out
     assert code == cli.EXIT_OK
-    assert "7 decoys" in out and "2 distinct attack signals" in out
+    assert "10 decoys" in out and "2 distinct attack signals" in out
 
 
 def test_signals_check_exits_1_when_a_decoy_is_an_attack_path(tmp_path, capsys):
