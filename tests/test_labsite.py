@@ -643,3 +643,59 @@ def test_no_canary_can_land_on_the_new_routes():
     routes = labsite.site_routes()
     for route in (labsite.FETCH_CHECK_PAGE, labsite.CHECKPOINT_ROUTE, "/lab/"):
         assert route in routes
+
+
+# -- text-mode browsers (lab test case 5) ---------------------------------------------
+
+
+def test_every_hidden_canary_starts_with_the_text_mode_notice():
+    hidden_ids = ("hidden_element.instruction", "error_page.bait")
+    for seed in SEEDS:
+        canary_set = make(seed)
+        for url_path, source in labsite.render_files(canary_set).items():
+            if not url_path.endswith(".html"):
+                continue
+            for canary_id in hidden_ids:
+                canary = canary_set.by_id(canary_id)
+                for at in (m.start() for m in re.finditer(re.escape(canary.path), source)):
+                    paragraph = source[source.rfind("<p ", 0, at) : at]
+                    if 'aria-hidden="true"' in paragraph:
+                        assert labsite.TEXT_MODE_NOTICE in paragraph, (seed, url_path, canary_id)
+
+
+def test_the_logo_link_has_a_name():
+    page = Page(labsite.render_files(make())["/index.html"])
+    assert f"{labsite.SITE_NAME} home" in page.exposed
+
+
+def _lynx_lines(path):
+    import shutil
+    import subprocess
+
+    lynx = shutil.which("lynx")
+    if lynx is None:
+        pytest.skip("lynx is not installed")
+    out = subprocess.run(  # noqa: S603 - fixed argv, a local file
+        [lynx, "-dump", "-nolist", "-width=10000", "-display_charset=utf-8", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    ).stdout
+    return [" ".join(line.split()) for line in out.splitlines()]
+
+
+@pytest.mark.parametrize(
+    ("page", "canary_id"),
+    [
+        ("index.html", "hidden_element.instruction"),
+        ("errors/404.html", "error_page.bait"),
+    ],
+)
+def test_lynx_shows_the_notice_with_each_hidden_canary(built, page, canary_id):
+    canary_set, result = built
+    canary = canary_set.by_id(canary_id)
+    lines = [line for line in _lynx_lines(result.web_root / page) if canary.path in line]
+    assert lines, "lynx no longer shows the hidden canary; recheck case 5's note"
+    notice = " ".join(labsite.TEXT_MODE_NOTICE.split())
+    assert all(line.startswith(notice) for line in lines), lines

@@ -18,6 +18,15 @@ Accessibility rule: no canary is read aloud to a screen-reader user. Canaries
 are either HTML comments (not in the DOM at all) or elements carrying
 ``aria-hidden="true"`` with nothing focusable inside.
 
+Text-mode browsers are the exception, and HTML cannot hide anything from them.
+Lynx 2.9.3 prints the text of an element hidden by CSS, by the ``hidden``
+attribute, by ``display: none`` and inside ``<template>`` alike; only comments
+and attribute values stay out. That is the same reason the hidden-element
+placement works at all: an agent that turns a page into text sees what a text
+browser shows. So hidden canary text is not hidden from those readers. It
+starts with ``TEXT_MODE_NOTICE`` instead, which tells a person reading it that
+the line is not meant for them (lab test case 5).
+
 The output holds an installation's canaries in clear, so it is refused inside
 any git work tree.
 """
@@ -113,6 +122,11 @@ _API_PAGE = "/developers/api.html"
 FETCH_CHECK_PAGE = "/lab/fetch-check.html"
 MARKER_COMMENT = "marker-comment-kestrel"
 MARKER_HIDDEN = "marker-hidden-heron"
+# Leads every hidden canary, for a person on a text-mode browser who sees it.
+TEXT_MODE_NOTICE = (
+    "Text-mode note: the rest of this line is hidden on the normal page"
+    " and is not meant for people."
+)
 MARKER_HEADER = "marker-header-plover"
 MARKER_HEADER_NAME = "X-Lab-Marker"
 
@@ -190,7 +204,7 @@ def _comment(canary: Canary, placeholder: str) -> str:
 
 
 def _hidden(canary: Canary, canary_set: CanarySet) -> str:
-    text = html.escape(_text(canary, canary_set.placeholder))
+    text = html.escape(f"{TEXT_MODE_NOTICE} {_text(canary, canary_set.placeholder)}")
     return f'<p class="{canary_set.hidden_class}" aria-hidden="true">{text}</p>'
 
 
@@ -204,7 +218,8 @@ def _layout(title: str, main: str, *, head: str = "", after_main: str = "", foot
         '<link rel="stylesheet" href="/assets/site.css">\n'
         '<link rel="icon" href="/assets/logo.svg" type="image/svg+xml">\n'
         f"{head}</head>\n<body>\n"
-        f'<header>\n<a href="/"><img src="/assets/logo.svg" alt="" width="32" height="32"></a>\n'
+        f'<header>\n<a href="/"><img src="/assets/logo.svg" alt="{SITE_NAME} home"'
+        ' width="32" height="32"></a>\n'
         f"<nav>\n{nav}\n</nav>\n</header>\n"
         f"<main>\n{main}\n{after_main}</main>\n"
         f"<footer>\n<p>{SITE_NAME}: a fictional test site.</p>\n{foot}</footer>\n"
