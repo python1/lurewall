@@ -44,6 +44,10 @@ class EngineConfig:
     adapter: str = "log-only"
     nft_path: str = "/usr/sbin/nft"
 
+    @property
+    def enforcing(self) -> bool:
+        return not self.dry_run and self.adapter == "nftables"
+
     def __post_init__(self) -> None:
         # Held here as well as in the parser, so a config built in code is
         # held to the same rules as one read from a file.

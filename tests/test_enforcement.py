@@ -7,6 +7,7 @@ test_nft's real-backend run.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import shutil
 import subprocess
@@ -130,7 +131,9 @@ def test_nothing_is_enforced_by_default():
 def test_the_default_adapter_is_log_only():
     assert EngineConfig().adapter == "log-only"
     rig = Rig(dry_run=False, adapter="log-only")
-    assert rig.attack().outcome == engine.BLOCK
+    assert rig.attack().outcome == engine.WOULD_BLOCK
+    assert rig.sink.of("would_block")[0][2]["reason"] == "log_only_adapter"
+    assert rig.sink.of("block") == []
     assert rig.fake.calls == []
 
 
@@ -201,8 +204,6 @@ def test_a_backlog_of_old_events_enforces_nothing():
 
 
 def test_guarded_sources_never_reach_nftables():
-    import ipaddress
-
     rig = Rig(
         dry_run=False,
         allowlist=(ipaddress.ip_network("192.0.2.0/24"),),
@@ -377,6 +378,91 @@ def test_blocks_decided_in_dry_run_are_never_put_in_place_later(tmp_path):
     assert again.sink.of("block_restored") == []
 
 
+def test_log_only_decisions_are_never_installed_on_switch_to_nftables(tmp_path):
+    state = tmp_path / "engine.json"
+    rig = Rig(state_path=state, dry_run=False, adapter="log-only")
+    rig.attack()
+
+    again = restart(rig, state, dry_run=False)
+    assert again.live() == {}
+    assert again.sink.of("block_restored") == []
+
+
+@pytest.mark.parametrize(
+    ("policy", "source", "protected", "outcome"),
+    [
+        ("allowlist", AGENT, "192.0.2.0/24", engine.ALLOWLISTED),
+        ("log_only", "2001:db8::11", "2001:db8::22/128", engine.LOG_ONLY_RANGE),
+    ],
+)
+@pytest.mark.parametrize("live", [True, False])
+def test_startup_reconcile_honors_current_protected_ranges(
+    tmp_path, policy, source, protected, outcome, live
+):
+    state = tmp_path / "engine.json"
+    rig = Rig(dry_run=False, state_path=state)
+    decision = rig.attack(ip=source)
+    if not live:
+        rig.fake.reboot()
+
+    again = restart(rig, state, dry_run=False, **{policy: (ipaddress.ip_network(protected),)})
+
+    assert again.live() == {}
+    assert again.engine.active_blocks() == {}
+    assert engine.read_status(state, rig.clock.now)["active_blocks"] == 0
+    assert again.sink.of("block_restored") == []
+    ((_, removed, detail, _),) = again.sink.of("decision")
+    assert removed == decision.source
+    assert detail == {"outcome": outcome, "action": "remove_block", "expiry_ms": decision.expiry_ms}
+
+
+def test_reconcile_backs_off_until_protected_removal_succeeds(tmp_path, monkeypatch):
+    state = tmp_path / "engine.json"
+    rig = Rig(dry_run=False, state_path=state)
+    decision = rig.attack()
+    other = rig.attack(ip=OTHER)
+    fail_cleanup = True
+    apply = rig.fake._apply
+
+    def apply_with_slow_failure(script):
+        if fail_cleanup and script.startswith("delete element"):
+            rig.clock.advance(3 * SECOND)
+            raise NftError("removal failed")
+        apply(script)
+
+    monkeypatch.setattr(rig.fake, "_apply", apply_with_slow_failure)
+
+    again = restart(rig, state, dry_run=False, allowlist=(ipaddress.ip_network(AGENT),))
+    assert again.report is None
+    assert again.engine.active_blocks() == {AGENT: decision.expiry_ms, OTHER: other.expiry_ms}
+    assert engine.read_status(state, rig.clock.now)["active_blocks"] == 2
+    assert again.sink.of("decision") == []
+
+    calls = len(rig.fake.calls)
+    for _ in range(3):
+        rig.clock.advance(SECOND // 4)
+        again.engine.tick()
+    assert len(rig.fake.calls) == calls
+    rig.clock.advance(SECOND // 4)
+    again.engine.tick()
+    assert len(again.sink.of("enforcement_failed")) == 2
+    assert again.sink.of("decision") == []
+
+    fail_cleanup = False
+    calls = len(rig.fake.calls)
+    rig.clock.advance(2 * SECOND - 1)
+    again.engine.tick()
+    assert len(rig.fake.calls) == calls
+    rig.clock.advance(1)
+    again.engine.tick()
+
+    assert again.live() == {OTHER: other.expiry_ms}
+    assert again.engine.active_blocks() == {OTHER: other.expiry_ms}
+    assert engine.read_status(state, rig.clock.now)["active_blocks"] == 1
+    assert again.sink.of("block_restored") == []
+    assert len(again.sink.of("decision")) == 1
+
+
 def test_a_failed_reconcile_is_logged_and_the_blocks_are_retried(tmp_path):
     state = tmp_path / "engine.json"
     rig = Rig(dry_run=False, ttl_ms=HOUR, state_path=state)
@@ -387,6 +473,7 @@ def test_a_failed_reconcile_is_logged_and_the_blocks_are_retried(tmp_path):
     assert again.report is None
     assert again.sink.of("enforcement_failed")[0][2]["action"] == "reconcile"
     again.fake.fail = False
+    rig.clock.advance(SECOND)
     again.engine.tick()
     assert again.live() == {AGENT: decision.expiry_ms}
 
@@ -469,6 +556,23 @@ def test_a_sweeper_failure_is_logged_and_the_next_run_tries_again(tmp_path, key)
     rig.fake.fail = False
     assert service.sweep(log, key, runner=rig.fake, clock=rig.clock, fsync=False) == (1, True)
     assert rig.live() == {}
+    assert verify_log(log, signing.EurekaSigner.load(key).public_key_hex).ok
+
+
+def test_the_sweeper_signs_a_failure_for_a_malformed_set_listing(tmp_path, key):
+    clock = FakeClock(T0)
+    fake = FakeNft(clock)
+    NftAdapter(fake, clock=clock, dry_run=False).ensure()
+    log = tmp_path / "sweeper.log"
+
+    def runner(args, stdin):
+        if args[:3] == ["-j", "list", "set"]:
+            return json.dumps({"nftables": [{"set": []}]})
+        return fake(args, stdin)
+
+    assert service.sweep(log, key, runner=runner, clock=clock, fsync=False) == (0, False)
+    (entry,) = entries(log)
+    assert entry["type"] == "sweep_failed"
     assert verify_log(log, signing.EurekaSigner.load(key).public_key_hex).ok
 
 
@@ -687,6 +791,49 @@ def test_the_run_command_processes_the_log_once_in_dry_run(lab, capsys):
     assert "would_block" not in seen
 
 
+def test_the_run_command_reports_log_only_without_dry_run(lab, capsys):
+    paths = lab("version = 1\ndry_run = false\n")
+    paths.access_log.write_bytes(b"")
+
+    assert cli.main(run_argv(paths)) == cli.EXIT_OK
+    assert "lurewall is running (log-only)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_ahead", "message"),
+    [
+        (True, "published checkpoint is ahead of the log"),
+        (False, "published checkpoint disagrees with the log head"),
+    ],
+)
+def test_the_run_command_reports_checkpoint_mismatch(lab, capsys, checkpoint_ahead, message):
+    paths = lab()
+    signer = signing.EurekaSigner.load(paths.key)
+    with EventLog(paths.event_log, signer, checkpoint_path=paths.checkpoint, fsync=False) as log:
+        log.append("probe")
+        shorter = paths.event_log.read_bytes()
+        log.append("probe")
+    checkpoint = paths.checkpoint.read_bytes()
+    if checkpoint_ahead:
+        restored = shorter
+    else:
+        backup = lab.dir / "backup.log"
+        with EventLog(backup, signer, fsync=False) as log:
+            log.append("probe", detail={"fixture": "backup"})
+            log.append("probe")
+        restored = backup.read_bytes()
+    paths.event_log.write_bytes(restored)
+
+    argv = [*run_argv(paths), "--checkpoint", str(paths.checkpoint)]
+    assert cli.main(argv) == cli.EXIT_LOG_CORRUPT
+    output = capsys.readouterr()
+    assert not output.out
+    assert "signed log integrity check failed" in output.err
+    assert message in output.err and "lab runbook" in output.err
+    assert paths.event_log.read_bytes() == restored
+    assert paths.checkpoint.read_bytes() == checkpoint
+
+
 def test_two_services_cannot_share_one_log(lab):
     paths = lab("version = 1\n")
     paths.access_log.write_bytes(b"")
@@ -723,6 +870,13 @@ def test_the_units_run_unprivileged_with_only_the_capability_nftables_needs():
         assert "CapabilityBoundingSet=CAP_NET_ADMIN\n" in text
         assert "ProtectSystem=strict" in text
     assert "lurewall run" in unit("lurewall.service")
+
+
+def test_the_service_does_not_restart_after_a_signed_log_integrity_failure():
+    directives = unit("lurewall.service").splitlines()
+    assert "Restart=on-failure" in directives
+    assert f"RestartPreventExitStatus={cli.EXIT_LOG_CORRUPT}" in directives
+    assert cli.EXIT_LOG_CORRUPT not in (cli.EXIT_OK, cli.EXIT_FAIL, cli.EXIT_USAGE)
 
 
 def test_the_units_pass_every_option_the_commands_require():

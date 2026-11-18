@@ -46,6 +46,7 @@ class Rig:
     """Collector plus engine on a fake clock. Every request gets its own millisecond."""
 
     def __init__(self, *, state_path=None, sink=None, clock=None, **config) -> None:
+        config.setdefault("adapter", "nftables")
         self.sink = sink or sig.ListSink()
         self.clock = clock or FakeClock(T0)
         self.canaries = sig.canary_set()
@@ -708,6 +709,19 @@ def test_the_issued_id_table_is_bounded_and_drops_are_logged():
     assert rig.hit(first, ip="203.0.113.1") is None  # rotated out: fails safe
 
 
+def test_issued_id_indexes_agree_after_a_source_replaces_its_own_evicted_id():
+    rig = Rig(max_issued_ids=2, max_ids_per_source=2)
+    rig.page(ip=AGENT)
+    other = rig.page(ip=OTHER)
+    latest = rig.page(ip=AGENT)
+
+    indexed = {
+        request_id: source for source, ids in rig.engine._issued_by.items() for request_id in ids
+    }
+    assert indexed == {request_id: source for request_id, (source, _) in rig.engine._issued.items()}
+    assert set(indexed) == {other, latest}
+
+
 def test_one_source_cannot_push_out_another_sources_ids():
     rig = Rig(dry_run=False, max_ids_per_source=16)
     mine = rig.page(ip=AGENT)
@@ -897,7 +911,7 @@ def test_the_whole_path_from_access_log_to_signed_decisions(tmp_path, signer):
     reader = LogReader(access, tmp_path / "reader.state", events, clock=clock)
     collector = SignalCollector(sig.classifier(), events)
     decisions = Engine(
-        EngineConfig(dry_run=False, ttl_ms=5 * MINUTE),
+        EngineConfig(dry_run=False, ttl_ms=5 * MINUTE, adapter="nftables"),
         events,
         collector.tracker,
         adapter=(adapter := FakeAdapter()),

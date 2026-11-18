@@ -548,6 +548,49 @@ def test_pull_refuses_two_histories_and_flags_going_back(tmp_path, key):
     assert pull(signed(key, 3)).status == "went_back"
 
 
+def test_pull_flags_an_older_checkpoint_already_in_history(tmp_path, key):
+    def pull(body):
+        return anchorjob.pull(
+            "http://[2001:db8::1]/snapshot",
+            key.public_key_hex,
+            tmp_path,
+            sender=lambda _target, _request: Response(200, (), body),
+        )
+
+    earlier = signed(key, 1)
+    latest = signed(key, 2)
+    assert pull(earlier).ok
+    assert pull(latest).ok
+    assert pull(latest).status == "unchanged"
+    anchors = tmp_path / "checkpoints"
+    saved = {path.name: path.read_bytes() for path in anchors.glob("*.json")}
+
+    result = pull(earlier)
+
+    assert (result.status, result.seq, result.ok) == ("went_back", 1, False)
+    assert len(saved) == 2
+    assert {path.name: path.read_bytes() for path in anchors.glob("*.json")} == saved
+
+
+def test_pull_preserves_the_first_checkpoint_for_a_matching_head(tmp_path, key):
+    def pull(timestamp):
+        checkpoint = make_checkpoint(key, 1, "ab" * 32, timestamp)
+        body = json.dumps(checkpoint).encode()
+        return anchorjob.pull(
+            "http://[2001:db8::1]/snapshot",
+            key.public_key_hex,
+            tmp_path,
+            sender=lambda _target, _request: Response(200, (), body),
+        )
+
+    assert pull(T0).status == "stored"
+    (saved,) = (tmp_path / "checkpoints").glob("*.json")
+    original = saved.read_bytes()
+
+    assert pull(T0 + 1).status == "unchanged"
+    assert saved.read_bytes() == original
+
+
 def test_pull_refuses_bad_checkpoints_and_bad_urls(tmp_path, key):
     other = signing.EurekaSigner.generate(tmp_path / "other.key")
     for body, status in (

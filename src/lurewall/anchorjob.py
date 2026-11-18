@@ -7,9 +7,9 @@ Run on a schedule on test machine A (launchd, see deploy/launchd/). Each run:
    only, size capped);
 2. checks its signature against the published public key, and refuses it
    otherwise;
-3. stores it as ``checkpoints/<seq>.json`` in a local git repository, refusing
-   to replace a stored checkpoint with a different one for the same sequence
-   number (that would mean two histories) and flagging one that goes backwards;
+3. stores it as ``checkpoints/<seq>.json`` in a local git repository, retaining
+   the first checkpoint for each sequence and flagging conflicting heads or
+   sequence numbers that go backwards;
 4. stamps it with OpenTimestamps if the ``ots`` client is given, and tries to
    upgrade earlier stamps;
 5. commits, and pushes only when asked.
@@ -102,9 +102,17 @@ def pull(
     directory = repo / DIRECTORY
     directory.mkdir(parents=True, exist_ok=True)
     stored = _stored(directory)
+    went_back = seq < max(stored, default=seq)
     if seq in stored:
-        return PullResult("unchanged" if stored[seq] == data else "conflict", seq)
-    status = "went_back" if stored and seq < max(stored) else "stored"
+        if stored[seq] != data:
+            try:
+                saved = entry_mod.check_checkpoint(json.loads(stored[seq]), public_key_hex)
+            except (ValueError, RecursionError):
+                return PullResult("conflict", seq)
+            if saved["seq"] != seq or saved["head_hash"] != checkpoint["head_hash"]:
+                return PullResult("conflict", seq)
+        return PullResult("went_back" if went_back else "unchanged", seq)
+    status = "went_back" if went_back else "stored"
     file = directory / f"{seq:012d}.json"
     file.write_bytes(data)
 

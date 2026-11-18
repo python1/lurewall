@@ -81,6 +81,8 @@ def _anchor_files(paths: list[Path], problems: list[AnchorProblem]) -> list[Path
                 and ".git" not in item.relative_to(path).parts
                 and item.is_file()
             )
+            if not found:
+                problems.append(AnchorProblem("anchor_no_checkpoints", file=_safe_name(path)))
             files.extend(found)
         elif path.is_file():
             files.append(path)
@@ -134,6 +136,8 @@ def load_anchors(
         except ValueError:
             problems.append(AnchorProblem("anchor_not_json", file=name))
             continue
+        if not objects:
+            problems.append(AnchorProblem("anchor_no_checkpoints", file=name))
         for obj in objects:
             try:
                 checkpoint = entry_mod.check_checkpoint(obj, public_key_hex)
@@ -225,6 +229,7 @@ _REASONS = {
     "anchor_bad_signature": "the checkpoint is not signed by this key",
     "anchor_bad_fields": "the checkpoint's fields are missing, extra or of the wrong type",
     "anchor_not_json": "the file is not JSON",
+    "anchor_no_checkpoints": "the input contains no checkpoints",
     "anchor_unreadable": "the file could not be read",
     "anchor_file_too_large": "the file is too large to be a checkpoint",
     "anchor_path_missing": "no such file or directory",

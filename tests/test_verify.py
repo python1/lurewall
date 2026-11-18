@@ -439,6 +439,28 @@ def test_missing_anchor_path_fails_verification(anchored, tmp_path):
     assert [p.reason for p in report.anchor_problems] == ["anchor_path_missing"]
 
 
+@pytest.mark.parametrize(
+    "content",
+    [None, b"", b" \n", b"[]"],
+    ids=["directory", "empty-file", "whitespace-file", "empty-array"],
+)
+def test_explicit_empty_anchor_input_fails_verification(make_log, tmp_path, content):
+    log = make_log()
+    log.append("probe")
+    log.close()
+    supplied = tmp_path / "anchors"
+    if content is None:
+        supplied.mkdir()
+    else:
+        supplied.write_bytes(content)
+
+    report = verify_log(log.path, log.public_key_hex, [supplied])
+
+    assert report.entries == 1 and not report.ok
+    assert [problem.reason for problem in report.anchor_problems] == ["anchor_no_checkpoints"]
+    assert verify_log(log.path, log.public_key_hex).ok
+
+
 def test_anchor_inputs_as_a_file_a_list_json_lines_and_a_repo_clone(anchored, tmp_path):
     path, anchors, signer = anchored
     checkpoints = [json.loads(file.read_text()) for file in sorted(anchors.iterdir())]

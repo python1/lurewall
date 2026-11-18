@@ -8,9 +8,9 @@ service reads nginx's log after each case. At the end the checkpoint is pulled
 through nginx, the results are exported, and every scripted case must come out
 as the lab expects.
 
-The engine runs with dry_run = false and the log-only adapter: decisions are
-the real ones, and nothing touches a firewall. Runs in CI next to the nginx
-integration tests; skipped without nginx unless LUREWALL_REQUIRE_NGINX=1.
+The engine runs in enforcing mode with a mock enforcement adapter so it can
+exercise block and expiry decisions for loopback sources. Runs in CI next to
+the nginx integration tests; skipped without nginx unless LUREWALL_REQUIRE_NGINX=1.
 """
 
 from __future__ import annotations
@@ -26,10 +26,13 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
 from lurewall import anchorjob, canaries, labcases, labclient, labsite, results, service, signing
+from lurewall.engine import Adapter
+from lurewall.nft import ReconcileReport
 
 REPO = Path(__file__).resolve().parents[1]
 NGINX = shutil.which("nginx") or next(
@@ -40,7 +43,7 @@ REQUIRED = os.environ.get("LUREWALL_REQUIRE_NGINX") == "1"
 ENGINE = """version = 1
 dry_run = false
 [enforcement]
-adapter = "log-only"
+adapter = "nftables"
 [block]
 ttl_minutes = 1
 [sources]
@@ -131,11 +134,17 @@ def lab(tmp_path_factory):
             engine_state=base / "engine.json",
             checkpoint=checkpoint,
         )
-        running = service.Service(paths, fsync=False)
+        adapter = Mock(spec=Adapter)
+        adapter.reconcile.return_value = ReconcileReport()
+        # The production nftables adapter refuses to block loopback addresses.
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr(service, "make_adapter", lambda *_args, **_kwargs: adapter)
+            running = service.Service(paths, fsync=False)
         yield {
             "base": base,
             "port": port,
             "service": running,
+            "adapter": adapter,
             "paths": paths,
             "signer": signer,
             "target": labclient.parse_target(f"http://127.0.0.1:{port}"),
@@ -182,7 +191,9 @@ def test_the_scripted_cases_come_out_as_the_lab_expects(lab):
 
     # Case 2 first: its block must expire (TTL 1 minute) before the end.
     blocked_at = time.monotonic()
-    run(lab, ledger, 2, "127.0.0.2", scripted=True)
+    blocked_source = run(lab, ledger, 2, "127.0.0.2", scripted=True)["source"]
+    expiry = lab["service"].engine.active_blocks()[blocked_source]
+    lab["adapter"].block.assert_called_once_with(blocked_source, expiry)
     run(lab, ledger, 3, "127.0.0.3")
     run(lab, ledger, 7, "127.0.0.7")
 
@@ -218,6 +229,7 @@ def test_the_scripted_cases_come_out_as_the_lab_expects(lab):
         time.sleep(1)
         lab["service"].step()
     drain(lab["service"])
+    lab["adapter"].unblock.assert_called_once_with(blocked_source)
     lab["service"].close()
 
     repo = lab["base"] / "anchors"

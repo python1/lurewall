@@ -106,8 +106,9 @@ def _strip_origin(uri: str) -> str:
     lowered = uri[:8].lower()
     if lowered.startswith(("http://", "https://")):
         rest = uri.split("//", 1)[1]
-        slash = rest.find("/")
-        return rest[slash:] if slash != -1 else "/"
+        authority_and_path, query_separator, query = rest.partition("?")
+        _, slash, path = authority_and_path.partition("/")
+        return (slash + path or "/") + query_separator + query
     return uri
 
 
