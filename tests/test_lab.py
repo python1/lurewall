@@ -642,6 +642,7 @@ def test_the_checkpoint_command_refuses_a_public_url(tmp_path, key, capsys):
 def test_logrotate_rotates_the_access_log_by_size_and_often():
     timer = (REPO / "deploy" / "logrotate" / "logrotate.timer.d-lurewall.conf").read_text()
     assert "OnCalendar=\nOnCalendar=*:0/15" in timer
+    assert "RandomizedDelaySec=0" in timer  # Debian's unit adds up to 1h of random delay
     runbook = (REPO / "docs" / "lab-runbook.md").read_text()
     assert "maxsize 100M" in runbook and "/etc/logrotate.d/nginx" in runbook
 
