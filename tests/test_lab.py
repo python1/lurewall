@@ -310,12 +310,12 @@ def evaluate(tmp_path, key, events, runs):
     return results.evaluate(entries, runs)
 
 
-MAC = "192.0.2.177"
+MACHINE_A = "192.0.2.177"
 
 
 def test_case_20_passes_only_when_dry_run_held_and_nothing_was_enforced(tmp_path, key):
     started = (T0, "service_started", None, {"dry_run": True, "adapter": "nftables"})
-    acted = (T0 + 5_000, "would_block", MAC, {"reason": "dry_run"})
+    acted = (T0 + 5_000, "would_block", MACHINE_A, {"reason": "dry_run"})
     (ok,) = evaluate(tmp_path, key, [started, acted], [run(20, T0 + 1_000, T0 + 9_000)])
     assert ok.verdict == results.PASS and ok.counts["would_block"] == 1
 
@@ -327,7 +327,7 @@ def test_case_20_passes_only_when_dry_run_held_and_nothing_was_enforced(tmp_path
     (mid,) = evaluate(tmp_path / "b", key, [started, restarted], [run(20, T0 + 1_000, T0 + 9_000)])
     assert mid.verdict == results.FAIL
 
-    blocked = (T0 + 5_000, "block", MAC, {"applied": True})
+    blocked = (T0 + 5_000, "block", MACHINE_A, {"applied": True})
     (worse,) = evaluate(tmp_path / "c", key, [started, blocked], [run(20, T0 + 1_000, T0 + 9_000)])
     assert worse.verdict == results.FAIL
 
@@ -339,7 +339,7 @@ def test_events_from_other_sources_or_times_are_not_counted(tmp_path, key):
     events = [
         (T0, "service_started", None, {"dry_run": True, "adapter": "log-only"}),
         (T0 + 5_000, "block", "192.0.2.152", {}),
-        (T0 + 30 * 60_000, "block", MAC, {}),
+        (T0 + 30 * 60_000, "block", MACHINE_A, {}),
     ]
     (result,) = evaluate(tmp_path, key, events, [run(20, T0 + 1_000, T0 + 9_000)])
     assert result.verdict == results.PASS and result.counts["block"] == 0
@@ -347,8 +347,8 @@ def test_events_from_other_sources_or_times_are_not_counted(tmp_path, key):
 
 def test_rolled_up_hits_count_and_count_as_counted(tmp_path, key):
     events = [
-        (T0 + 1_000, "cross_site", MAC, {}),
-        (T0 + 2_000, "rollup", MAC, {"of": "canary_hit", "key": "x", "count": 3}),
+        (T0 + 1_000, "cross_site", MACHINE_A, {}),
+        (T0 + 2_000, "rollup", MACHINE_A, {"of": "canary_hit", "key": "x", "count": 3}),
     ]
     (result,) = evaluate(tmp_path, key, events, [run(8, T0, T0 + 5_000)])
     assert result.counts["canary_hit"] == 3 and result.verdict == results.FAIL
@@ -359,44 +359,47 @@ def test_case_verdicts(tmp_path, key):
         directory = tmp_path / f"run{len(list(tmp_path.iterdir()))}"
         return evaluate(directory, key, events, [run(case, T0, T0 + 5_000, **extra)])[0]
 
-    hit = (T0 + 1_000, "canary_hit", MAC, {"counted": True, "placement": "p", "lure": "bait"})
-    sig = (T0 + 1_500, "attack_signal", MAC, {"signal": "path:tree:/.env"})
+    hit = (T0 + 1_000, "canary_hit", MACHINE_A, {"counted": True, "placement": "p", "lure": "bait"})
+    sig = (T0 + 1_500, "attack_signal", MACHINE_A, {"signal": "path:tree:/.env"})
     assert one(1, [hit]).verdict == results.PASS
-    assert one(1, [hit, (T0 + 2_000, "would_block", MAC, {})]).verdict == results.FAIL
+    assert one(1, [hit, (T0 + 2_000, "would_block", MACHINE_A, {})]).verdict == results.FAIL
     assert one(3, [sig]).verdict == results.PASS
     assert one(3, [sig, hit]).verdict == results.FAIL
     assert one(4, []).verdict == results.PASS
     assert one(4, [sig]).verdict == results.FAIL
-    allow = (T0 + 1_000, "would_block", MAC, {"reason": "allowlisted"})
+    allow = (T0 + 1_000, "would_block", MACHINE_A, {"reason": "allowlisted"})
     assert one(7, [allow]).verdict == results.PASS
-    assert one(7, [allow, (T0 + 2_000, "block", MAC, {})]).verdict == results.FAIL
-    dry = (T0 + 1_000, "would_block", MAC, {"reason": "dry_run"})
+    assert one(7, [allow, (T0 + 2_000, "block", MACHINE_A, {})]).verdict == results.FAIL
+    dry = (T0 + 1_000, "would_block", MACHINE_A, {"reason": "dry_run"})
     assert one(7, [dry]).verdict == results.FAIL  # dry-run is not the allowlist at work
     assert one(9, [hit]).verdict == results.PASS
-    relayed = (T0 + 1_000, "canary_relayed", MAC, {})
+    relayed = (T0 + 1_000, "canary_relayed", MACHINE_A, {})
     assert one(10, [relayed], part="hit").verdict == results.PASS
     assert one(12, [], part="probe").verdict == results.LIMIT
-    sig2 = (T0 + 1_600, "attack_signal", MAC, {"signal": "path:tree:/.git"})
+    sig2 = (T0 + 1_600, "attack_signal", MACHINE_A, {"signal": "path:tree:/.git"})
     assert one(15, [sig, sig2], statuses={"429": 150}).verdict == results.PASS
     assert one(15, [sig, sig2], statuses={"404": 200}).verdict == results.FAIL
     assert one(17, [sig, sig2], sent=2).verdict == results.PASS
     assert one(17, [sig], sent=2).verdict == results.FAIL
-    assert one(18, [(T0 + 1_000, "decision", MAC, {"outcome": "log_only_range"})]).verdict == "pass"
+    assert (
+        one(18, [(T0 + 1_000, "decision", MACHINE_A, {"outcome": "log_only_range"})]).verdict
+        == "pass"
+    )
     assert one(5, []).verdict == results.RECORD
     assert one(14, [], part="backlog").verdict == results.PASS
-    assert one(14, [(T0 + 1_000, "block", MAC, {})], part="backlog").verdict == results.FAIL
+    assert one(14, [(T0 + 1_000, "block", MACHINE_A, {})], part="backlog").verdict == results.FAIL
 
 
 def test_case_2_needs_a_block_and_its_expiry_unless_in_dry_run(tmp_path, key):
     enforcing = (T0 - 10, "service_started", None, {"dry_run": False, "adapter": "nftables"})
-    block = (T0 + 1_000, "block", MAC, {})
-    expired = (T0 + 6 * 60_000, "block_expired", MAC, {})
+    block = (T0 + 1_000, "block", MACHINE_A, {})
+    expired = (T0 + 6 * 60_000, "block_expired", MACHINE_A, {})
     (both,) = evaluate(tmp_path, key, [enforcing, block, expired], [run(2, T0, T0 + 5_000)])
     assert both.verdict == results.PASS
     (no_expiry,) = evaluate(tmp_path / "a", key, [enforcing, block], [run(2, T0, T0 + 5_000)])
     assert no_expiry.verdict == results.FAIL
     dry = (T0 - 10, "service_started", None, {"dry_run": True, "adapter": "log-only"})
-    would = (T0 + 1_000, "would_block", MAC, {})
+    would = (T0 + 1_000, "would_block", MACHINE_A, {})
     (rehearsal,) = evaluate(tmp_path / "b", key, [dry, would], [run(2, T0, T0 + 5_000)])
     assert rehearsal.verdict == results.PASS and "dry-run" in rehearsal.why
 
@@ -440,7 +443,12 @@ def test_the_export_escapes_everything_from_the_ledger_and_the_log(tmp_path, key
     hostile = '=cmd|"/c calc"!A1 \x1b[2J <img src=x> | ‮'
     events = [
         (T0, "service_started", None, {"dry_run": True, "adapter": "log-only"}),
-        (T0 + 1_000, "canary_hit", MAC, {"placement": hostile, "lure": hostile, "counted": True}),
+        (
+            T0 + 1_000,
+            "canary_hit",
+            MACHINE_A,
+            {"placement": hostile, "lure": hostile, "counted": True},
+        ),
     ]
     write_log(log, key, events, FakeClock(T0))
     runs = [run(1, T0, T0 + 5_000, label=hostile, note=hostile)]
@@ -729,13 +737,15 @@ def test_results_report_hits_per_family_and_signal_and_per_agent(tmp_path, key):
     events = [
         (T0, "service_started", None, {"dry_run": True, "adapter": "log-only"}),
         # A v1 log entry has no family or signal: it reads as v1-imperative, ai.
-        (T0 + 1_000, "canary_hit", MAC, {"placement": "api_doc", "lure": "bait", "counted": True}),
-        (T0 + 2_000, "canary_hit", MAC, {"placement": "footer_comment", "lure": "destination",
+        (T0 + 1_000, "canary_hit", MACHINE_A, {"placement": "api_doc", "lure": "bait",
+                                               "counted": True}),
+        (T0 + 2_000, "canary_hit", MACHINE_A, {"placement": "footer_comment", "lure": "destination",
                                          "family": "v2-quiet", "signal": "ai", "counted": True}),
-        (T0 + 3_000, "canary_hit", MAC, {"placement": "security_txt", "lure": "destination",
+        (T0 + 3_000, "canary_hit", MACHINE_A, {"placement": "security_txt", "lure": "destination",
                                          "family": "v2-quiet", "signal": "research",
                                          "counted": False}),
-        (T0 + 600_000, "canary_hit", MAC, {"placement": "robots_disallow", "lure": "destination",
+        (T0 + 600_000, "canary_hit", MACHINE_A, {"placement": "robots_disallow",
+                                                 "lure": "destination",
                                           "family": "v2-quiet", "signal": "recon",
                                           "counted": True}),
     ]  # fmt: skip
