@@ -239,6 +239,7 @@ cp /opt/lurewall/deploy/nginx/lurewall-log.conf /etc/nginx/conf.d/lurewall-log.c
 rm /etc/nginx/sites-enabled/default
 ln -s /srv/lurewall/site/nginx/lurewall-site.conf /etc/nginx/sites-enabled/lurewall-site.conf
 nginx -t && systemctl reload nginx
+sleep 2      # reload returns before the old workers stop; checks run too early see the old site
 curl -s http://127.0.0.1/ | grep -c 'Lab Tool Library'      # expect a number above 0
 curl -sI http://127.0.0.1/lab/fetch-check.html | grep -i x-lab-marker
 ```
@@ -275,7 +276,10 @@ systemd-analyze verify /etc/systemd/system/lurewall.service \
 ## Phase 4: close internet access and take a snapshot (pve host)
 
 ```sh
-cp /root/110.fw.before-pr8 /etc/pve/firewall/110.fw
+sed -i -e 's/^OUT ACCEPT -p udp -dport 53$/|&/' \
+       -e 's/^OUT ACCEPT -p tcp -dport 53$/|&/' \
+       -e 's/^OUT ACCEPT -p tcp -dport 80$/|&/' \
+       -e 's/^OUT ACCEPT -p tcp -dport 443$/|&/' /etc/pve/firewall/110.fw
 pve-firewall compile >/dev/null && echo "rules OK"
 pve-firewall status        # repeat until it no longer says pending
 cat /etc/pve/firewall/110.fw      # the four OUT ACCEPT lines start with | again
