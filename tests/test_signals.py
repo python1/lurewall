@@ -591,3 +591,72 @@ def test_on_plain_http_the_referer_still_marks_a_request_cross_site():
 def test_on_plain_http_asset_loads_are_still_ordinary_browsing():
     result = HTTP.classify(sig.rec("/assets/site.css", referer="http://192.168.1.160/"))
     assert result.asset and result.behavior == ()
+
+
+# -- v2: the build spec's normalization list and the added probe paths -----------------
+
+SPEC_VARIANTS = [
+    ("/.ENV", "*/.env"),
+    ("/.Env", "*/.env"),
+    ("/.GIT/config", "*/.git"),
+    ("/%2eenv", "*/.env"),
+    ("/%2Eenv", "*/.env"),
+    ("/%252eenv", "*/.env"),
+    ("/.git%2fconfig", "*/.git"),
+    ("//.env", "*/.env"),
+    ("/./.env", "*/.env"),
+    ("/..;/.env", "*/.env"),
+    ("/foo/..;/.git/HEAD", "*/.git"),
+    ("/.env/", "*/.env"),
+    ("/.env.", "*/.env"),
+]
+
+
+@pytest.mark.parametrize(("uri", "rule"), SPEC_VARIANTS)
+def test_every_spelling_in_the_build_spec_is_the_same_signal(uri, rule):
+    config = sig.lab_config()
+    rules = signals.match_attack_paths(config, uri)
+    assert rule in rules, (uri, rules)
+    plain = "/.env" if rule == "*/.env" else "/.git/config"
+    assert set(signals.match_attack_paths(config, plain)) & set(rules)
+
+
+NEW_PROBES = [
+    "/.env~", "/.env.save", "/.env.example", "/config.php.bak", "/web.config", "/settings.py",
+    "/.npmrc", "/.pypirc", "/.aws/credentials", "/.docker/config.json", "/.git/logs/HEAD",
+    "/.git/refs/heads/main", "/.hg/", "/.bzr/", "/phpmyadmin/", "/actuator/env",
+    "/actuator/heapdump", "/_profiler", "/server-info", "/.vscode/sftp.json",
+    "/index.php.swp", "/.config.php.swp", "/config.old", "/backup/site.old",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("uri", NEW_PROBES)
+def test_the_added_probe_paths_are_attack_signals(uri):
+    assert signals.match_attack_paths(sig.lab_config(), uri), uri
+
+
+NOT_PROBES = [
+    "/environment-guide/", "/docs/settings-guide.html", "/docker-tips.html",
+    "/profiler-notes.html", "/notes.old.html", "/old/", "/swp/", "/server-information.html",
+    "/gitbook/", "/git-guide.html", "/envoy/", "/.github/", "/settings/", "/actuators.html",
+    "/config.php.bak.html", "/settings.py.html", "/.well-known/security.txt", "/bzr-notes/",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("uri", NOT_PROBES)
+def test_real_looking_paths_near_the_new_rules_do_not_match(uri):
+    assert signals.match_attack_paths(sig.lab_config(), uri) == [], uri
+
+
+def test_the_lenient_form_only_drops_path_parameters_and_trailing_dots():
+    assert signals.lenient_path("/..;/.env") == "/.env"
+    assert signals.lenient_path("/a/b;x=1/c") == "/a/b/c"
+    assert signals.lenient_path("/.env.") == "/.env"
+    assert signals.lenient_path("/docs/") is None  # nothing to change
+    assert signals.lenient_path("/a/../b") is None or signals.lenient_path("/a/../b") == "/b"
+
+
+def test_suffix_rules_need_something_before_the_suffix():
+    config = sig.lab_config()
+    assert signals.match_attack_paths(config, "/.old") == []
+    assert signals.match_attack_paths(config, "/.swp") == []

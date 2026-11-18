@@ -17,7 +17,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from lurewall import canaries, engineconfig, labsite, sigconfig, signing
@@ -76,7 +76,22 @@ class Service:
         # signed log is opened, so a bad config writes nothing.
         config = engineconfig.load(paths.engine_config)
         canary_set = canaries.load_state(paths.canaries)
-        classifier = Classifier(sigconfig.load(paths.signals), canary_set, labsite.site_routes())
+        routes = labsite.site_routes()
+        # A decoy that collides with a real route is disabled, not served as a
+        # trap: a real page must never count as a canary hit.
+        disabled = sorted(
+            {canary_id for canary_id, _route in canaries.find_collisions(canary_set, routes)}
+        )
+        if disabled:
+            canary_set = replace(
+                canary_set, canaries=tuple(c for c in canary_set.canaries if c.id not in disabled)
+            )
+        classifier = Classifier(
+            sigconfig.load(paths.signals),
+            canary_set,
+            routes,
+            labsite.quiet_carriers(canary_set),
+        )
         signer = signing.EurekaSigner.load(paths.key)
 
         self.config = config
@@ -99,6 +114,8 @@ class Service:
             self.events.append(
                 "service_started", None, {"dry_run": config.dry_run, "adapter": config.adapter}
             )
+            for canary_id in disabled:
+                self.events.append("canary_disabled_collision", None, {"canary": canary_id})
             self.engine.start()
         except BaseException:
             self.events.close()

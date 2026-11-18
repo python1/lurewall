@@ -11,13 +11,21 @@ from pathlib import Path
 import pytest
 
 from lurewall import canaries, labsite
-from lurewall.canaries import PLACEMENTS, CanaryError, CollisionError
+from lurewall.canaries import ALL_PLACEMENTS, CanaryError, CollisionError
 from lurewall.cli import main
 
 REPO = Path(__file__).resolve().parents[1]
 SEEDS = range(40)
 VOID = {"meta", "link", "img", "br", "hr", "input"}
 FOCUSABLE = {"a", "button", "input", "select", "textarea", "summary", "iframe", "area"}
+
+
+def v1(canary_set):
+    return [canary for canary in canary_set.canaries if not canary.quiet]
+
+
+def quiet(canary_set):
+    return {canary.id: canary for canary in canary_set.canaries if canary.quiet}
 
 
 def make(seed=1, extra=None):
@@ -183,10 +191,14 @@ def test_every_canary_reference_on_a_page_carries_the_request_id_placeholder(bui
         if not path.is_file():
             continue
         text = path.read_text()
-        for canary in canary_set.canaries:
+        for canary in v1(canary_set):
             for match in re.finditer(re.escape(canary.path), text):
                 tail = text[match.end() : match.end() + 2 + len(canary.param) + 32]
                 assert tail == f"?{canary.param}={canary_set.placeholder}", (path, canary.id)
+        for canary in quiet(canary_set).values():
+            # A quiet reference is the bare path: it is bound by the page, not an ID.
+            for match in re.finditer(re.escape(canary.path), text):
+                assert text[match.end()] in " \n", (path, canary.id)
 
 
 def test_nginx_replaces_the_placeholder_with_the_request_id_everywhere(built):
@@ -199,7 +211,7 @@ def test_nginx_replaces_the_placeholder_with_the_request_id_everywhere(built):
         assert stamp in block and "sub_filter_once off;" in block
         assert "sub_filter_types text/plain;" in block  # robots.txt; text/html is always on
     assert conf.count(stamp) == 3
-    for canary in canary_set.canaries:
+    for canary in v1(canary_set):
         block = conf.split(f"location = {canary.path} {{", 1)[1].split("\n    }", 1)[0]
         assert "sub_filter" not in block
     assert 'add_header Cache-Control "no-store" always;' in conf
@@ -226,7 +238,7 @@ def test_the_placeholder_looks_like_a_request_id_and_is_nowhere_else(built):
     assert re.fullmatch(r"[0-9a-f]{32}", canary_set.placeholder)
     for canary in canary_set.canaries:
         assert canary_set.placeholder not in canary.body
-    for index in range(len(canary_set.canaries)):
+    for index in range(len(v1(canary_set))):
         assert (
             canary_set.placeholder not in (result.out_dir / "decoys" / f"{index}.body").read_text()
         )
@@ -283,7 +295,7 @@ def test_comment_canaries_cannot_end_their_comment_early():
     for seed in SEEDS:
         canary_set = make(seed)
         page = Page(labsite.render_files(canary_set)["/index.html"])
-        assert len(page.comments) == 2
+        assert len(page.comments) == 3  # two v1 comments and canary B
         assert all("--" not in comment for comment in page.comments)
         assert "alert" not in "".join(page.exposed)
 
@@ -298,20 +310,27 @@ def test_ordinary_content_is_still_exposed(built):
 # -- not announced, not indexed ---------------------------------------------------------------
 
 
-def test_robots_txt_has_no_disallow_line_and_names_only_its_own_lure(built):
+def test_robots_txt_has_one_disallow_line_and_it_is_canary_a(built):
     canary_set, result = built
     robots = read(result, "/robots.txt")
-    assert "disallow" not in robots.lower()
+    a = quiet(canary_set)["robots_disallow.quiet"]
     live = [line for line in robots.splitlines() if line and not line.startswith("#")]
-    assert live == ["User-agent: *", "Allow: /", "Sitemap: /sitemap.xml"]
+    assert live == ["User-agent: *", f"Disallow: {a.path}", "Allow: /", "Sitemap: /sitemap.xml"]
     named = [c.id for c in canary_set.canaries if c.path in robots]
-    assert named == ["robots_comment.instruction"]
+    assert named == ["robots_comment.instruction", "robots_disallow.quiet"]
+
+
+def test_a_v1_only_site_keeps_its_v1_robots_txt():
+    old = canaries.generate(labsite.site_routes(), rng=random.Random(2), now_ms=1, quiet=False)
+    robots = labsite.render_files(old)["/robots.txt"]
+    assert "disallow" not in robots.lower()
+    assert "#" not in labsite.render_files(old)[labsite.SECURITY_TXT]
 
 
 def test_decoys_carry_x_robots_tag_instead(built):
     canary_set, result = built
     conf = result.nginx_conf.read_text()
-    for canary in canary_set.canaries:
+    for canary in v1(canary_set):
         block = re.search(r"location = " + re.escape(canary.path) + r" \{(.*?)\n    \}", conf, re.S)
         assert block, canary.id
         assert 'add_header X-Robots-Tag "noindex, nofollow" always;' in block.group(1)
@@ -351,7 +370,9 @@ def test_only_table_paths_get_a_decoy_location(built):
     conf = result.nginx_conf.read_text()
     not_decoys = {"/developers/api.html", labsite.FETCH_CHECK_PAGE, labsite.CHECKPOINT_ROUTE}
     decoy_locations = [path for path in exact_locations(conf) if path not in not_decoys]
-    assert decoy_locations == [c.path for c in canary_set.canaries]
+    assert decoy_locations == [c.path for c in v1(canary_set)]
+    for canary in quiet(canary_set).values():
+        assert canary.path not in conf and canary.path.rstrip("/") not in conf
     # No prefix or regex location could answer a path outside the table.
     assert re.findall(r"^\s*location (\S+) \{", conf, re.M) == [
         "/",
@@ -369,7 +390,7 @@ def test_decoys_answer_200_with_a_fixed_body_never_204(built):
     conf = result.nginx_conf.read_text()
     directives = [ln for ln in conf.splitlines() if not ln.strip().startswith("#")]
     assert not any(re.search(r"\breturn\b", line) for line in directives)
-    for index, canary in enumerate(canary_set.canaries):
+    for index, canary in enumerate(v1(canary_set)):
         body_file = result.out_dir / "decoys" / f"{index}.body"
         assert body_file.read_text() == canary.body and canary.body
         assert f"alias {result.out_dir.resolve()}/decoys/{index}.body;" in conf
@@ -524,7 +545,7 @@ def test_cli_first_build_creates_private_state_and_later_builds_reuse_it(tmp_pat
     code, text, _err = run(capsys, "lab-site", "build", "--state", state, "--out", out,
                            "--deploy-root", "/srv/lurewall-lab", "--listen", "80")  # fmt: skip
     assert code == 0 and "generated a new canary set" in text
-    assert "7 (4 instruction, 3 bait)" in text and "no collisions" in text
+    assert "10 (4 instruction, 3 bait, 3 quiet)" in text and "no collisions" in text
     assert stat.S_IMODE(state.stat().st_mode) == 0o600
     first = state.read_bytes()
     conf = (out / "nginx" / "lurewall-site.conf").read_text()
@@ -542,9 +563,15 @@ def test_cli_list_shows_the_table_with_lure_labels(tmp_path, capsys):
     canaries.save_state(make(), state)
     code, text, _err = run(capsys, "canaries", "list", "--state", state)
     rows = [line.split("\t") for line in text.splitlines()]
-    assert code == 0 and [row[0] for row in rows] == list(PLACEMENTS)
+    assert code == 0 and [row[0] for row in rows] == list(ALL_PLACEMENTS)
     assert [row[1] for row in rows].count("instruction") == 4
     assert [row[1] for row in rows].count("bait") == 3
+    assert [row[1] for row in rows].count("destination") == 3
+    assert {(row[0], row[5]) for row in rows if row[4] == "v2-quiet"} == {
+        ("footer_comment.quiet", "ai"),
+        ("robots_disallow.quiet", "recon"),
+        ("security_txt.quiet", "research"),
+    }
 
 
 def test_cli_rotate_is_explicit_and_scoped(tmp_path, capsys):
@@ -699,3 +726,61 @@ def test_lynx_shows_the_notice_with_each_hidden_canary(built, page, canary_id):
     assert lines, "lynx no longer shows the hidden canary; recheck case 5's note"
     notice = " ".join(labsite.TEXT_MODE_NOTICE.split())
     assert all(line.startswith(notice) for line in lines), lines
+
+
+# -- v2 quiet canaries on the site ----------------------------------------------------
+
+
+def test_canary_b_is_a_footer_comment_on_every_content_page_and_nowhere_else(built):
+    canary_set, _result = built
+    b = quiet(canary_set)["footer_comment.quiet"]
+    files = labsite.render_files(canary_set)
+    carriers = labsite.quiet_carriers(canary_set)
+    for url_path, text in files.items():
+        if url_path.endswith(".html") and url_path in labsite._PAGES:
+            page = Page(text)
+            assert any(b.path in comment for comment in page.comments), url_path
+            assert b.path not in " ".join(page.exposed + page.hidden)  # a comment only
+            footer = text.split("<footer>", 1)[1]
+            assert b.path in footer
+            assert carriers[url_path] == ("footer_comment.quiet",)
+        else:
+            assert b.path not in text, url_path
+    assert carriers["/"] == carriers["/docs/"] == ("footer_comment.quiet",)
+    assert "/errors/404.html" not in carriers and labsite.FETCH_CHECK_PAGE not in carriers
+
+
+def test_security_txt_is_valid_and_carries_canary_c_as_a_comment():
+    canary_set = make()
+    c = quiet(canary_set)["security_txt.quiet"]
+    day = 86_400_000
+    text = labsite.render_files(canary_set, now_ms=20_000 * day)[labsite.SECURITY_TXT]
+    lines = text.splitlines()
+    assert lines[0] == f"Contact: {labsite.SECURITY_CONTACT}"
+    assert lines[1] == "Expires: 2025-04-02T00:00:00.000Z"  # 2024-10-04 plus 180 days
+    assert [line for line in lines if c.path in line] == [f"# {c.text.replace('{ref}', c.path)}"]
+    assert labsite.quiet_carriers(canary_set)[labsite.SECURITY_TXT] == ("security_txt.quiet",)
+    assert ".invalid" in labsite.SECURITY_CONTACT  # a fictional site: no real inbox
+
+
+def test_every_404_carries_noindex_and_the_same_headers_as_the_rest_of_the_site(built):
+    canary_set, result = built
+    conf = result.nginx_conf.read_text()
+    errors = conf.split("location /errors/ {", 1)[1].split("\n    }", 1)[0]
+    assert 'add_header X-Robots-Tag "noindex" always;' in errors
+    # add_header in a location drops the server's, so they are repeated here.
+    assert 'add_header Cache-Control "no-store" always;' in errors
+    assert f"add_header {canary_set.header_name} " in errors
+
+
+def test_quiet_canaries_hide_from_screen_readers_and_text_browsers():
+    # B and C are comments; A is a robots.txt line. None is page text.
+    for seed in SEEDS:
+        canary_set = make(seed)
+        for url_path, source in labsite.render_files(canary_set).items():
+            if not url_path.endswith(".html"):
+                continue
+            page = Page(source)
+            exposed = " ".join(page.exposed + page.hidden)
+            for canary in quiet(canary_set).values():
+                assert canary.path not in exposed

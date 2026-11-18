@@ -236,6 +236,8 @@ def test_every_placement_is_served_stamped_and_its_decoy_answers(lab):
     assert set(carried) == set(canaries.PLACEMENTS)
 
     for canary in lab.canary_set.canaries:
+        if canary.quiet:
+            continue  # no body: a quiet decoy gets the ordinary 404 (below)
         ua = fresh_ua()
         status, headers, body = lab.get(canary.reference(carried[canary.id]), ua=ua)
         assert status == 200 and status != 204, canary.id
@@ -250,6 +252,8 @@ def test_every_placement_is_served_stamped_and_its_decoy_answers(lab):
 
 def test_decoy_body_is_fixed_whatever_the_request(lab):
     for canary in lab.canary_set.canaries:
+        if canary.quiet:
+            continue
         bodies = set()
         for suffix in ("", "?x=1", f"?{canary.param}={'a' * 32}", f"?{canary.param}=not-an-id"):
             status, _headers, body = lab.get(canary.path + suffix)
@@ -289,7 +293,7 @@ def test_a_path_outside_the_table_gets_the_normal_404(lab):
             assert status == 404, near
             assert ID_RE.sub("ID", body.decode()) == baseline_body, near
             assert sorted(headers) == baseline_headers, near
-            assert "x-robots-tag" not in headers
+            assert headers["x-robots-tag"] == "noindex", near  # every 404, v2
     for other in (
         "/.env",
         "/admin",
@@ -302,6 +306,36 @@ def test_a_path_outside_the_table_gets_the_normal_404(lab):
         assert ID_RE.sub("ID", body.decode()) == baseline_body, other
 
 
+def test_a_quiet_decoy_gets_exactly_the_normal_404(lab):
+    # Byte for byte apart from the request ID nginx stamps into every 404 page.
+    baseline_body, baseline_headers = normal_404(lab)
+    quiet = [canary for canary in lab.canary_set.canaries if canary.quiet]
+    assert len(quiet) == 3
+    for canary in quiet:
+        for spelling in (canary.path, canary.path.rstrip("/"), canary.path.upper()):
+            status, headers, body = lab.get(spelling)
+            assert status == 404, canary.id
+            assert ID_RE.sub("ID", body.decode()) == baseline_body, canary.id
+            assert sorted(headers) == baseline_headers, canary.id
+            assert headers["x-robots-tag"] == "noindex"
+            assert headers["cache-control"] == "no-store"
+            assert "set-cookie" not in headers and "location" not in headers
+        status, _headers, body = lab.get(canary.path, method="HEAD")
+        assert status == 404 and body == b""
+
+
+def test_quiet_canaries_are_served_where_the_spec_puts_them(lab):
+    quiet = {canary.id: canary for canary in lab.canary_set.canaries if canary.quiet}
+    _status, _headers, page = lab.get("/")
+    assert quiet["footer_comment.quiet"].path.encode() in page.split(b"<footer>", 1)[1]
+    status, headers, text = lab.get("/.well-known/security.txt")
+    assert status == 200 and headers["content-type"].startswith("text/plain")
+    assert text.startswith(b"Contact: mailto:")
+    assert quiet["security_txt.quiet"].path.encode() in text
+    _status, _headers, robots = lab.get("/robots.txt")
+    assert f"Disallow: {quiet['robots_disallow.quiet'].path}".encode() in robots
+
+
 def test_decoy_bodies_and_config_are_not_reachable_any_other_way(lab):
     for path in ("/decoys/", "/../decoys/0.body", "/www/index.html", "/.lurewall-lab-site"):
         status, _headers, _body = lab.get(path)
@@ -311,10 +345,12 @@ def test_decoy_bodies_and_config_are_not_reachable_any_other_way(lab):
 # -- not announced, not indexed, not cached ------------------------------------------------
 
 
-def test_robots_txt_as_served_has_no_disallow(lab):
+def test_robots_txt_as_served_disallows_only_canary_a(lab):
     status, headers, text, logged_id = fetch_page(lab, "/robots.txt")
     assert status == 200 and headers["content-type"].startswith("text/plain")
-    assert "disallow" not in text.lower()
+    disallow = [line for line in text.splitlines() if line.lower().startswith("disallow")]
+    a = next(c for c in lab.canary_set.canaries if c.id == "robots_disallow.quiet")
+    assert disallow == [f"Disallow: {a.path}"]
     assert refs_in(lab, text) == {"robots_comment.instruction": logged_id}
 
 
@@ -427,7 +463,12 @@ def _classifier(lab, *, https: bool = False):
     if https:
         # The same rules on an HTTPS site, where browsers send fetch metadata.
         config = dataclasses.replace(config, https=True, hosts=frozenset({"lab"}))
-    return signals.Classifier(config, lab.canary_set, labsite.site_routes())
+    return signals.Classifier(
+        config,
+        lab.canary_set,
+        labsite.site_routes(),
+        labsite.quiet_carriers(lab.canary_set),
+    )
 
 
 def _request(
@@ -494,7 +535,7 @@ def test_real_pages_assets_and_decoys_raise_no_attack_signal_on_a_real_nginx(lab
     assert result.asset and result.browser_metadata
     for canary in lab.canary_set.canaries:
         response, record = _request(lab, b"GET", canary.reference("0f" * 16).encode())
-        assert response.startswith(b"HTTP/1.1 200")
+        assert response.startswith(b"HTTP/1.1 404" if canary.quiet else b"HTTP/1.1 200")
         result = classifier.classify(record)
         assert result.attack == ()
         assert result.counted_canary is not None and result.counted_canary.canary.id == canary.id

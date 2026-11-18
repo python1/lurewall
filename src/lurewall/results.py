@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from lurewall import entry as entry_mod
+from lurewall.canaries import AI, V1_IMPERATIVE, V2_QUIET
 from lurewall.entry import Entry, EntryError
 from lurewall.labcases import CASES
 from lurewall.sources import source_key
@@ -95,6 +96,7 @@ class RunResult:
     counts: Counter = field(default_factory=Counter)
     outcomes: Counter = field(default_factory=Counter)
     canaries: Counter = field(default_factory=Counter)  # (placement, lure) -> hits
+    families: Counter = field(default_factory=Counter)  # (family, signal) -> hits
     would_reasons: Counter = field(default_factory=Counter)  # why a would_block was not a block
     signal_keys: set = field(default_factory=set)
     counted_hits: int = 0
@@ -145,6 +147,10 @@ def _collect(result: RunResult, entries: list[Entry]) -> None:
             placement = str(item.detail.get("placement"))
             lure = str(item.detail.get("lure"))
             result.canaries[(placement, lure)] += 1
+            # A v1 log has neither field: every v1 canary is v1-imperative, signal ai.
+            family = str(item.detail.get("family", V1_IMPERATIVE))
+            signal = str(item.detail.get("signal", AI))
+            result.families[(family, signal)] += 1
             if item.detail.get("counted") is True:
                 result.counted_hits += 1
         if item.type == "attack_signal" or (item.type == "rollup" and kind == "attack_signal"):
@@ -307,6 +313,23 @@ def hit_rates(results: list[RunResult]) -> list[tuple[str, int, int]]:
     return [(key, hits[key], runs[key]) for key in sorted(runs)]
 
 
+def family_hit_rates(results: list[RunResult]) -> list[tuple[str, int, int, int]]:
+    """Agent cases only: (agent, runs with a v1 hit, runs with a v2 hit, runs)."""
+    runs: Counter = Counter()
+    v1: Counter = Counter()
+    v2: Counter = Counter()
+    for result in results:
+        case = CASES.get(result.run["case"])
+        if case is None or case.kind != "agent" or result.run["case"] == 19:
+            continue
+        key = f"case {result.run['case']}: {result.run.get('label') or 'unlabelled'}"
+        runs[key] += 1
+        families = {family for family, _signal in result.families}
+        v1[key] += 1 if V1_IMPERATIVE in families else 0
+        v2[key] += 1 if V2_QUIET in families else 0
+    return [(key, v1[key], v2[key], runs[key]) for key in sorted(runs)]
+
+
 def write(results: list[RunResult], report: Report, out: Path, *, verified: bool) -> list[Path]:
     out.mkdir(parents=True, exist_ok=True, mode=0o700)
     banner = (
@@ -339,6 +362,25 @@ def write(results: list[RunResult], report: Report, out: Path, *, verified: bool
     lines.append("|---|---|---|")
     for key, hit, total in hit_rates(results):
         lines.append(f"| {md(key)} | {hit} | {total} |")
+    lines += ["", "## Canary hits per family and signal", "", "| family | signal | hits |"]
+    lines.append("|---|---|---|")
+    by_family: Counter = Counter()
+    for result in results:
+        by_family.update(result.families)
+    for (family, signal), count in sorted(by_family.items()):
+        lines.append(f"| {md(family)} | {md(signal)} | {count} |")
+    lines += [
+        "",
+        "Signal `ai` and `recon` hits count toward a block; `recon` (robots.txt) can also come "
+        "from an ordinary scanner. `research` (security.txt) hits are logged and never counted.",
+        "",
+        "## Agent runs per canary family",
+        "",
+        "| agent | runs with a v1-imperative hit | runs with a v2-quiet hit | runs |",
+        "|---|---|---|---|",
+    ]
+    for key, v1_runs, v2_runs, total in family_hit_rates(results):
+        lines.append(f"| {md(key)} | {v1_runs} | {v2_runs} | {total} |")
     md_path = out / "results.md"
     md_path.write_text("\n".join(lines) + "\n", encoding="ascii")
     return [csv_path, md_path]

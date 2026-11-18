@@ -721,3 +721,35 @@ def test_results_merge_ledgers_from_both_clients(tmp_path, key, capsys):
     assert cli.main(argv) == cli.EXIT_OK
     rows = (tmp_path / "out" / "results.csv").read_text().splitlines()[2:]
     assert [row.split(",")[0] for row in rows] == ["3", "4"]
+
+
+def test_results_report_hits_per_family_and_signal_and_per_agent(tmp_path, key):
+    log = tmp_path / "events.log"
+    events = [
+        (T0, "service_started", None, {"dry_run": True, "adapter": "log-only"}),
+        # A v1 log entry has no family or signal: it reads as v1-imperative, ai.
+        (T0 + 1_000, "canary_hit", MAC, {"placement": "api_doc", "lure": "bait", "counted": True}),
+        (T0 + 2_000, "canary_hit", MAC, {"placement": "footer_comment", "lure": "destination",
+                                         "family": "v2-quiet", "signal": "ai", "counted": True}),
+        (T0 + 3_000, "canary_hit", MAC, {"placement": "security_txt", "lure": "destination",
+                                         "family": "v2-quiet", "signal": "research",
+                                         "counted": False}),
+        (T0 + 600_000, "canary_hit", MAC, {"placement": "robots_disallow", "lure": "destination",
+                                          "family": "v2-quiet", "signal": "recon",
+                                          "counted": True}),
+    ]  # fmt: skip
+    write_log(log, key, events, FakeClock(T0))
+    runs = [
+        run(1, T0, T0 + 5_000, label="agent x"),
+        run(1, T0 + 599_000, T0 + 601_000, label="agent y"),
+    ]
+    _, rows, _written = results.export(log, key.public_key_hex, [], runs, tmp_path / "out")
+    assert rows[0].families == {("v1-imperative", "ai"): 1, ("v2-quiet", "ai"): 1,
+                                ("v2-quiet", "research"): 1}  # fmt: skip
+    assert results.family_hit_rates(rows) == [
+        ("case 1: agent x", 1, 1, 1),
+        ("case 1: agent y", 0, 1, 1),
+    ]
+    markdown = (tmp_path / "out" / "results.md").read_text()
+    assert "| v2\\-quiet | recon | 1 |" in markdown and "| v1\\-imperative | ai | 1 |" in markdown
+    assert "never counted" in markdown

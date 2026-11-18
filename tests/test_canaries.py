@@ -3,6 +3,7 @@
 
 import json
 import random
+import re
 import stat
 import subprocess
 from dataclasses import asdict, replace
@@ -13,10 +14,13 @@ import pytest
 from lurewall import canaries, labsite
 from lurewall import wordbank as bank
 from lurewall.canaries import (
+    ALL_PLACEMENTS,
     BAIT,
+    DESTINATION,
     EXAMPLE_MARKER,
     INSTRUCTION,
     PLACEMENTS,
+    QUIET_PLACEMENTS,
     CanaryError,
     CollisionError,
 )
@@ -31,6 +35,11 @@ def make(seed=1, routes=ROUTES):
     return canaries.generate(routes, rng=random.Random(seed), now_ms=1)
 
 
+def v1(canary_set):
+    """The v1 canaries of a set: the ones with a request ID, a body and an exact path."""
+    return [canary for canary in canary_set.canaries if not canary.quiet]
+
+
 def with_canary(canary_set, canary_id, **changes):
     swapped = tuple(replace(c, **changes) if c.id == canary_id else c for c in canary_set.canaries)
     return replace(canary_set, canaries=swapped)
@@ -42,12 +51,12 @@ def with_canary(canary_set, canary_id, **changes):
 def test_every_decoy_path_maps_to_exactly_one_placement():
     for seed in SEEDS:
         canary_set = make(seed)
-        assert [c.id for c in canary_set.canaries] == list(PLACEMENTS)
+        assert [c.id for c in canary_set.canaries] == list(ALL_PLACEMENTS)
         paths = [c.path for c in canary_set.canaries]
-        assert len(set(paths)) == len(PLACEMENTS)
+        assert len(set(paths)) == len(ALL_PLACEMENTS)
         for canary in canary_set.canaries:
             assert canary_set.lookup_path(canary.path) is canary
-            assert (canary.placement, canary.lure) == PLACEMENTS[canary.id]
+            assert (canary.placement, canary.lure) == ALL_PLACEMENTS[canary.id]
 
 
 def test_both_lure_types_are_present_and_labelled():
@@ -61,8 +70,11 @@ def test_both_lure_types_are_present_and_labelled():
         "api_doc.bait": BAIT,
         "error_page.bait": BAIT,
         "response_header.instruction": INSTRUCTION,
+        "footer_comment.quiet": DESTINATION,
+        "robots_disallow.quiet": DESTINATION,
+        "security_txt.quiet": DESTINATION,
     }
-    assert canary_set.lure_counts() == {INSTRUCTION: 4, BAIT: 3}
+    assert canary_set.lure_counts() == {INSTRUCTION: 4, BAIT: 3, DESTINATION: 3}
 
 
 def test_instruction_lures_address_the_reader_and_bait_lures_do_not():
@@ -95,7 +107,7 @@ def test_decoy_paths_share_no_prefix_and_no_marker():
 
 def test_decoy_paths_look_like_ordinary_site_paths():
     for seed in SEEDS:
-        for canary in make(seed).canaries:
+        for canary in v1(make(seed)):
             segments = canary.path.strip("/").split("/")
             assert 2 <= len(segments) <= 4
             assert canary.path == canary.path.lower()
@@ -116,7 +128,7 @@ def test_decoy_paths_never_look_like_an_attack_path_probe():
 
 
 def test_request_id_keys_look_like_cache_busters():
-    seen = {c.param for seed in SEEDS for c in make(seed).canaries}
+    seen = {c.param for seed in SEEDS for c in v1(make(seed))}
     assert seen <= set(bank.ID_PARAMS) and len(seen) > 3
     assert not seen & {"token", "session", "sid", "key", "auth", "canary"}
 
@@ -132,7 +144,7 @@ def test_each_installation_gets_different_canaries():
     assert len({s.header_name for s in sets}) > 20
     assert len({s.hidden_class for s in sets}) > 3
     assert len({c.text for s in sets for c in s.canaries}) > 100
-    assert len({c.path for s in sets for c in s.canaries}) == len(sets) * len(PLACEMENTS)
+    assert len({c.path for s in sets for c in s.canaries}) == len(sets) * len(ALL_PLACEMENTS)
 
 
 def test_generated_header_is_never_a_real_header():
@@ -188,7 +200,7 @@ def test_decoy_bodies_come_only_from_the_fixed_bank():
     }
     allowed_text = {word + "\n" for word in bank.BODY_TEXT}
     for seed in SEEDS:
-        for canary in make(seed).canaries:
+        for canary in v1(make(seed)):
             if canary.content_type == "application/json":
                 assert canary.body in allowed_json
             elif canary.content_type == "text/plain":
@@ -231,8 +243,10 @@ def test_generator_avoids_every_real_route_even_on_a_crowded_site():
     for seed in range(40):
         canary_set = make(seed, crowded)
         assert canaries.find_collisions(canary_set, crowded) == []
-        firsts = {c.path.split("/")[1] for c in canary_set.canaries}
-        assert firsts <= set(bank.DIRS[len(bank.DIRS) - 12 :])
+        free = bank.DIRS[len(bank.DIRS) - 12 :]
+        for canary in canary_set.canaries:
+            first = canary.path.split("/")[1]  # canary A's is "<dir>-<word>-<token>"
+            assert any(first == name or first.startswith(name + "-") for name in free)
 
 
 def test_generator_fails_rather_than_collide_when_no_names_are_left():
@@ -298,7 +312,7 @@ def test_rotation_replaces_only_the_named_canaries():
 
 def test_rotating_everything_changes_every_path_and_keeps_the_rules():
     canary_set = make()
-    rotated = canaries.rotate(canary_set, list(PLACEMENTS), ROUTES, rng=random.Random(9))
+    rotated = canaries.rotate(canary_set, list(ALL_PLACEMENTS), ROUTES, rng=random.Random(9))
     assert not {c.path for c in rotated.canaries} & {c.path for c in canary_set.canaries}
     old_firsts = {c.path.split("/")[1] for c in canary_set.canaries}
     assert not {c.path.split("/")[1] for c in rotated.canaries} & old_firsts
@@ -312,7 +326,7 @@ def test_rotating_everything_changes_every_path_and_keeps_the_rules():
 
 def test_lookup_names_the_lure_and_the_request_id():
     canary_set = make()
-    for canary in canary_set.canaries:
+    for canary in v1(canary_set):
         hit = canary_set.lookup_uri(canary.reference(RID))
         assert hit.canary is canary and hit.request_id == RID
         assert (hit.canary.placement, hit.canary.lure) == PLACEMENTS[canary.id]
@@ -356,7 +370,7 @@ def test_lookup_follows_nginx_normalization():
 )
 def test_a_path_outside_the_table_is_not_a_canary(transform):
     canary_set = make()
-    for canary in canary_set.canaries:
+    for canary in v1(canary_set):
         assert canary_set.lookup_uri(transform(canary.path)) is None
     for other in ("/", "/index.html", "/.env", "/random/path-123", "", "?", "*"):
         assert canary_set.lookup_uri(other) is None
@@ -586,3 +600,113 @@ def test_malformed_state_documents_are_refused():
     for raw in cases:
         with pytest.raises(CanaryError):
             canaries.parse_state(raw)
+
+
+# -- v2 quiet canaries ---------------------------------------------------------------
+
+
+def quiet(canary_set):
+    return {canary.id: canary for canary in canary_set.canaries if canary.quiet}
+
+
+def test_quiet_canaries_have_a_family_a_signal_and_one_letter_each():
+    for canary_id in PLACEMENTS:
+        assert canaries.family_of(canary_id) == canaries.V1_IMPERATIVE
+        assert canaries.signal_of(canary_id) == canaries.AI
+    assert canaries.signal_of("footer_comment.quiet") == canaries.AI  # B
+    assert canaries.signal_of("robots_disallow.quiet") == canaries.RECON  # A
+    assert canaries.signal_of("security_txt.quiet") == canaries.RESEARCH  # C
+    assert {canaries.family_of(i) for i in QUIET_PLACEMENTS} == {canaries.V2_QUIET}
+    assert not canaries.counts_toward_block("security_txt.quiet")
+    assert canaries.counts_toward_block("robots_disallow.quiet")
+    assert sorted(canaries.QUIET_LETTERS.values()) == ["A", "B", "C"]
+    assert canaries.signal_of("some.old_id") == canaries.AI  # an old log reads as v1
+
+
+def test_quiet_paths_are_directories_ending_in_a_per_install_token():
+    tokens = set()
+    for seed in SEEDS:
+        for canary in quiet(make(seed)).values():
+            assert canary.path.endswith("/") and canary.path == canary.path.lower()
+            token = canary.path.rstrip("/").rsplit("-", 1)[1]
+            assert len(token) == 8 and set(token) <= set("0123456789abcdef")
+            tokens.add(token)
+            assert canary.param == canary.body == canary.content_type == ""
+            assert canary.reference(RID) == canary.path  # no ID in a quiet reference
+    assert len(tokens) > 400
+    for canary_id in QUIET_PLACEMENTS:
+        assert canaries.path_space(canary_id) >= 2**32
+
+
+def test_no_quiet_lure_gives_an_order():
+    texts = {c.text for seed in SEEDS for c in quiet(make(seed)).values()}
+    texts |= set(bank.QUIET_FOOTER_NOTES) | set(bank.QUIET_SECURITY_NOTES)
+    assert len(texts) > 8
+    for text in texts:
+        words = set(re.findall(r"[a-z]+", text.replace("{ref}", "").lower()))
+        assert not words & canaries.IMPERATIVE_WORDS, text
+    canary_set = make()
+    bad = with_canary(canary_set, "footer_comment.quiet", text="please verify {ref}")
+    with pytest.raises(CanaryError, match="may not tell the reader"):
+        canaries.validate(bad)
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        lambda p: p,
+        lambda p: p.rstrip("/"),
+        lambda p: p.upper(),
+        lambda p: p.rstrip("/").upper(),
+        lambda p: p + "?utm=1",
+        lambda p: p.replace("/", "//"),
+        lambda p: p[:1] + p[1:].replace("/", "%2f", 1) if p.count("/") > 2 else p,
+    ],
+)
+def test_a_quiet_decoy_matches_in_any_spelling_that_reaches_it(spelling):
+    canary_set = make()
+    for canary in quiet(canary_set).values():
+        hit = canary_set.lookup_uri(spelling(canary.path))
+        assert hit is not None and hit.canary is canary and hit.request_id is None
+
+
+def test_a_near_miss_of_a_quiet_decoy_is_not_a_canary():
+    canary_set = make()
+    for canary in quiet(canary_set).values():
+        bare = canary.path.rstrip("/")
+        for near in (bare[:-1], bare + "0", bare + "/x", bare.rsplit("-", 1)[0] + "-"):
+            assert canary_set.lookup_uri(near) is None, near
+
+
+def test_a_v1_only_state_still_loads_and_upgrades_in_place(tmp_path):
+    old = canaries.generate(ROUTES, rng=random.Random(5), now_ms=1, quiet=False)
+    assert not old.has_quiet and [c.id for c in old.canaries] == list(PLACEMENTS)
+    state = tmp_path / "state" / "canaries.json"
+    canaries.save_state(old, state)
+    loaded = canaries.load_state(state)
+    assert loaded == old
+    upgraded = canaries.add_quiet(loaded, ROUTES, rng=random.Random(6))
+    assert upgraded.canaries[: len(PLACEMENTS)] == old.canaries  # v1 untouched
+    assert set(quiet(upgraded)) == set(QUIET_PLACEMENTS)
+    assert canaries.add_quiet(upgraded, ROUTES) is upgraded
+    firsts = [c.path.split("/")[1] for c in upgraded.canaries]
+    assert len(set(firsts)) == len(firsts)
+
+
+def test_a_set_with_only_some_quiet_canaries_is_refused():
+    canary_set = make()
+    partial = replace(
+        canary_set,
+        canaries=tuple(c for c in canary_set.canaries if c.id != "security_txt.quiet"),
+    )
+    with pytest.raises(CanaryError, match="none or all of the v2 quiet"):
+        canaries.validate(partial)
+
+
+def test_rotating_a_quiet_canary_changes_only_its_token_and_place():
+    canary_set = make()
+    rotated = canaries.rotate(canary_set, ["robots_disallow.quiet"], ROUTES, rng=random.Random(4))
+    before, after = quiet(canary_set), quiet(rotated)
+    assert before["robots_disallow.quiet"].path != after["robots_disallow.quiet"].path
+    assert before["footer_comment.quiet"] == after["footer_comment.quiet"]
+    assert v1(canary_set) == v1(rotated)

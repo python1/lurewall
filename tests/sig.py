@@ -34,7 +34,10 @@ def canary_set(seed: int = 1):
 
 def classifier(seed: int = 1, *, shipped: bool = False) -> Classifier:
     config = shipped_config() if shipped else lab_config()
-    return Classifier(config, canary_set(seed), labsite.site_routes())
+    canary_set_ = canary_set(seed)
+    return Classifier(
+        config, canary_set_, labsite.site_routes(), labsite.quiet_carriers(canary_set_)
+    )
 
 
 def rec(

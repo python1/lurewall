@@ -40,6 +40,8 @@ _HOST_RE = re.compile(r"[a-z0-9]([a-z0-9.:-]{0,251}[a-z0-9])?", re.ASCII)
 _METHOD_RE = re.compile(r"[A-Z]{3,16}", re.ASCII)
 _PREFIX_RE = re.compile(r"/(?:[a-z0-9._~-]{1,64}/){1,8}", re.ASCII)
 _EXTENSION_RE = re.compile(r"[a-z0-9]{1,8}", re.ASCII)
+# "~", ".swp", ".old": short, and never a whole path or a dot alone.
+_SUFFIX_RE = re.compile(r"~|\.[a-z0-9]{1,8}~?", re.ASCII)
 
 
 class SignalConfigError(ValueError):
@@ -57,6 +59,7 @@ class SignalConfig:
     exact: frozenset[str]  # the normalized path equals this
     tree: tuple[str, ...]  # the path is this, or sits under it
     segment: frozenset[str]  # any one path segment equals this
+    suffix: tuple[str, ...]  # the last segment ends with this (editor and backup leftovers)
     injection_families: frozenset[str]
     abuse_methods: frozenset[str]
     window_ms: int
@@ -135,10 +138,11 @@ def parse(raw: bytes | str) -> SignalConfig:
             "another host cannot be told apart"
         )
 
-    paths = _table(doc, "attack_paths", {"exact", "tree", "segment"})
+    paths = _table(doc, "attack_paths", {"exact", "tree", "segment", "suffix"})
     exact = _path_rules(paths, "exact")
     tree = _path_rules(paths, "tree")
     segment = _strings(paths, "attack_paths", "segment", _SEGMENT_RE)
+    suffix = _strings(paths, "attack_paths", "suffix", _SUFFIX_RE)
     if any(item in (".", "..") for item in segment):
         raise SignalConfigError("attack_paths.segment may not hold a dot segment")
 
@@ -166,6 +170,7 @@ def parse(raw: bytes | str) -> SignalConfig:
         exact=frozenset(exact),
         tree=tuple(sorted(tree)),
         segment=frozenset(segment),
+        suffix=tuple(sorted(suffix)),
         injection_families=frozenset(families),
         abuse_methods=frozenset(abuse),
         window_ms=_integer(limits, "thresholds", "window_minutes", 15, 1, 24 * 60) * 60_000,
@@ -219,6 +224,11 @@ def check_against_site(config: SignalConfig, canary_set, real_paths: Iterable[st
         for rule in sorted(config.exact.union(config.tree)):
             if rule == decoy or rule.startswith(decoy + "/"):
                 problems.append(f"attack path rule {rule} sits on decoy {canary.id}")
+        for spelling in _quiet_spellings(canary):
+            rules = signals.match_attack_paths(config, spelling)
+            if rules:
+                problems.append(f"decoy {canary.id} matches attack path rule {rules[0]}")
+                break
     for route in sorted(set(real_paths)):
         if collision_key(route) == "/":
             continue
@@ -231,6 +241,14 @@ def check_against_site(config: SignalConfig, canary_set, real_paths: Iterable[st
         raise SignalConfigError(
             "signals config does not fit the site: " + "; ".join(dict.fromkeys(problems))
         )
+
+
+def _quiet_spellings(canary) -> list[str]:
+    """A quiet decoy also counts without its trailing slash and in upper case."""
+    if not canary.quiet:
+        return []
+    bare = canary.path.rstrip("/")
+    return [bare, bare.upper(), canary.path.upper()]
 
 
 def _encoded(path: str) -> str:

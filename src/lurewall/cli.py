@@ -361,6 +361,12 @@ def _canary_command(args: argparse.Namespace) -> int:
         if args.command == "lab-site":
             if args.state.exists():
                 canary_set = canaries.load_state(args.state)
+                if not canary_set.has_quiet:
+                    # v2: a v1 installation gains canaries B, A and C; its v1
+                    # canaries stay exactly as they were.
+                    canary_set = canaries.add_quiet(canary_set, labsite.site_routes())
+                    canaries.save_state(canary_set, args.state)
+                    print("added the v2 quiet canaries (B, A, C) to the canary set")
             else:
                 canary_set = canaries.generate(labsite.site_routes())
                 canaries.save_state(canary_set, args.state)
@@ -377,19 +383,23 @@ def _canary_command(args: argparse.Namespace) -> int:
             print(f"nginx config: {result.nginx_conf}")
             print(
                 f"canaries: {len(canary_set.canaries)} "
-                f"({counts['instruction']} instruction, {counts['bait']} bait); "
+                f"({counts['instruction']} instruction, {counts['bait']} bait, "
+                f"{counts['destination']} quiet); "
                 f"checked against {len(result.routes)} real routes, no collisions"
             )
             return EXIT_OK
         canary_set = canaries.load_state(args.state)
         if args.canary_command == "rotate":
-            ids = list(canaries.PLACEMENTS) if args.all else args.id
+            ids = [c.id for c in canary_set.canaries] if args.all else args.id
             canary_set = canaries.rotate(canary_set, ids, labsite.site_routes())
             canaries.save_state(canary_set, args.state)
             print(f"rotated {len(set(ids))} canaries. Rebuild the site to put them in place.")
             return EXIT_OK
         for canary in canary_set.canaries:
-            print(f"{canary.id}\t{canary.lure}\t{canary.path}\t{canary.param}")
+            print(
+                f"{canary.id}\t{canary.lure}\t{canary.path}\t{canary.param}"
+                f"\t{canary.family}\t{canary.signal}"
+            )
         return EXIT_OK
     except canaries.CollisionError as exc:
         print(f"{name}: BUILD FAILED: {exc}", file=sys.stderr)

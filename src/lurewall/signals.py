@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import unquote_to_bytes, urlsplit
 
@@ -87,6 +88,8 @@ class Classification:
     asset: bool  # a successful load of one of the site's assets
     browser_metadata: bool  # Sec-Fetch-Site says the browser made it for this site
     path: str | None  # the normalized, lowercased path, or None if nginx would refuse it
+    # The quiet canaries this response carried to the source (a page served whole).
+    carries: tuple[str, ...] = ()
 
     @property
     def counted_canary(self) -> CanaryHit | None:
@@ -118,6 +121,31 @@ def normalized_path(uri: str) -> str | None:
     return None if path is None else path.lower()
 
 
+def lenient_path(path: str) -> str | None:
+    """A normalized path as other servers may read it, for attack-path rules only.
+
+    Path parameters are dropped (``/..;/`` is ``/../`` to Tomcat, ``x.php;a``
+    is ``x.php``), and trailing dots come off each segment (``/.env.`` is
+    ``/.env`` to Windows servers). nginx itself does neither.
+    """
+    out: list[str] = []
+    for segment in path.split("/"):
+        bare = segment.split(";", 1)[0]
+        if bare not in (".", ".."):
+            bare = bare.rstrip(".") or bare
+        if bare in ("", "."):
+            continue
+        if bare == "..":
+            if out:
+                out.pop()  # above the root it stays at the root
+            continue
+        out.append(bare)
+    lenient = "/" + "/".join(out)
+    if path.endswith("/") and lenient != "/":
+        lenient += "/"
+    return None if lenient == path else lenient.lower()
+
+
 # -- attack paths ---------------------------------------------------------------------
 
 
@@ -132,6 +160,10 @@ def _match_path(config: SignalConfig, path: str) -> list[str]:
     for segment in path.split("/"):
         if segment in config.segment:
             found.append(f"*/{segment}")
+    last = trimmed.rsplit("/", 1)[-1]
+    for suffix in config.suffix:
+        if len(last) > len(suffix) and last.endswith(suffix):
+            found.append(f"*{suffix}")
     return found
 
 
@@ -145,6 +177,10 @@ def _path_matches(config: SignalConfig, uri: str) -> list[tuple[str, str]]:
     if normal is not None:
         for rule in _match_path(config, normal):
             seen.setdefault(rule, NORMALIZED)
+        lenient = lenient_path(normal)
+        if lenient is not None:
+            for rule in _match_path(config, lenient):
+                seen.setdefault(rule, NORMALIZED)
         if "%" in normal:
             # Decoded once more. Still a path nginx would accept, or nothing.
             twice = nginx_normalize(normal)
@@ -356,17 +392,31 @@ def _behavior(record: Record, target: str) -> list[Signal]:
 class Classifier:
     """Classifies records for one site. Refuses a config that does not fit it."""
 
-    def __init__(self, config: SignalConfig, canary_set: CanarySet, real_paths) -> None:
+    def __init__(
+        self,
+        config: SignalConfig,
+        canary_set: CanarySet,
+        real_paths,
+        carriers: Mapping[str, tuple[str, ...]] | None = None,
+    ) -> None:
         # No classifier exists for a config under which a decoy, or a real
         # page, could count as an attack path.
         check_against_site(config, canary_set, real_paths)
         self.config = config
         self._canaries = canary_set
+        present = {canary.id for canary in canary_set.canaries}
+        self._carriers = {
+            path: tuple(i for i in ids if i in present)
+            for path, ids in (carriers or {}).items()
+            if any(i in present for i in ids)
+        }
 
     def classify(self, record: Record) -> Classification:
         config = self.config
         target = _strip_origin(record.uri)
         canary = self._canaries.lookup_uri(target)
+        if canary is not None and canary.canary.quiet and record.method not in ("GET", "HEAD"):
+            canary = None  # a quiet decoy counts for GET and HEAD only
         found = attack_signals_for(config, record.method, target, decoy=canary is not None)
         reason = cross_site_reason(config, record.sec_fetch_site, record.referer)
         path = normalized_path(target)
@@ -387,6 +437,15 @@ class Classifier:
                 or path.rpartition(".")[2] in config.asset_extensions
             )
         )
+        carries: tuple[str, ...] = ()
+        if (
+            reason is None
+            and canary is None
+            and path is not None
+            and record.method in ("GET", "HEAD")
+            and record.status == 200
+        ):
+            carries = self._carriers.get(path, ())
         return Classification(
             cross_site=reason,
             canary=canary,
@@ -396,4 +455,5 @@ class Classifier:
             asset=asset,
             browser_metadata=clean and fetch_site in ("same-origin", "same-site", "none"),
             path=path,
+            carries=carries,
         )
