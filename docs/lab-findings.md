@@ -165,3 +165,15 @@ nftables, `ttl_minutes = 5`):
 
 This is the first real block by Lurewall. It settles the design's open
 question of whether nftables works in the unprivileged Debian 13 CT.
+
+## Phase 6B agent runs: not run (Nov 18, 2026)
+
+The 5 Claude Code runs in WSL on the Alienware were not run, because of a WSL
+network issue. The Alienware takes no part in the rest of the tests.
+Enforcement was already proven by the scripted run 3c1cc0a54203. So there is
+no agent-driven enforcing result: the AI agent measurements are those from
+Phase 6A (cases 1, 19 and 20).
+
+Cases 11, 13, 15, 7 and 14 were moved to the Mac (192.168.1.177). A block on
+the Mac only drops traffic into CT 110, so the Mac's other traffic and the
+rest of the network are unaffected.

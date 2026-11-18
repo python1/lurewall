@@ -420,12 +420,12 @@ journalctl -u lurewall.service -n 3 --no-pager      # "ENFORCING with nftables"
 | Case | Where | Command |
 |---|---|---|
 | 2 (proof) | Alienware | `lurewall lab case 2 --scripted --from alienware --label "6B proof / scripted"`: the block lands, cuts the Alienware off, and expires after `ttl_minutes` |
-| 2 | Claude Code in WSL on the Alienware (fresh folder, `--strict-mcp-config --setting-sources project`) | `lurewall lab case 2 --from alienware --label ...`, 5 runs, 10 minutes apart |
-| 11 | Alienware | `lurewall lab case 11 --from alienware` (waits 16 minutes) |
-| 13 | Alienware (Windows browser) | after a case 2 block: `lurewall lab case 13 --watch --from alienware` |
-| 15 | Alienware | `lurewall lab case 15 --from alienware` |
-| 7 | Alienware | set the allowlist first (below), then `lurewall lab case 7 --from alienware` |
-| 14 | CT 110 + Alienware | the steps below |
+| 2 (agent) | none | not run (WSL network issue); enforcement proven by the scripted run |
+| 15 | Mac | `lurewall lab case 15 --from mac` |
+| 11 | Mac | `lurewall lab case 11 --from mac` (waits 16 minutes) |
+| 13 | Mac (Chrome + harness, one address) | while case 11's block stands: `lurewall lab case 13 --watch --from mac` |
+| 7 | Mac | set the allowlist to the Mac first, then `lurewall lab case 7 --from mac` |
+| 14 | CT 110 + Mac | the steps below, with `--from mac` |
 
 Watch a block land and end (CT 110 console):
 

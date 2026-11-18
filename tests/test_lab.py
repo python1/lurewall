@@ -647,11 +647,14 @@ def test_logrotate_rotates_the_access_log_by_size_and_often():
     assert "maxsize 100M" in runbook and "/etc/logrotate.d/nginx" in runbook
 
 
-def test_the_runbook_keeps_case_20_and_the_mac_in_dry_run():
+def test_the_runbook_keeps_case_20_in_dry_run():
+    # Since Nov 18, 2026 the Mac runs 6B's scripted cases (Paul's call: a block
+    # only drops traffic into CT 110). Case 20, Warden from the Mac, stays dry-run.
     runbook = (REPO / "docs" / "lab-runbook.md").read_text()
     dry, enforcing = runbook.split("### 6B", 1)
     assert "lurewall lab case 20 --from mac" in dry
-    assert "--from mac" not in enforcing.split("## Phase 7", 1)[0]
+    assert "case 20" not in enforcing.split("## Phase 7", 1)[0]
+    assert labcases.CASES[20].dry_run_only
 
 
 def test_the_mac_job_runs_the_pull_command_every_five_minutes():
