@@ -171,9 +171,9 @@ def test_a_chunked_response_is_read():
 def test_there_are_twenty_cases_and_only_case_20_is_dry_run_only():
     assert sorted(labcases.CASES) == list(range(1, 21))
     assert [n for n, case in labcases.CASES.items() if case.dry_run_only] == [20]
-    warden = labcases.CASES[20]
-    assert "Warden" in warden.title and "Ask every time" in warden.title
-    assert "192.168.1.177" in warden.clients and "dry_run = true" in warden.setup
+    careful = labcases.CASES[20]
+    assert "careful AI agent" in careful.title and "Ask every time" in careful.title
+    assert "192.168.1.177" in careful.clients and "dry_run = true" in careful.setup
 
 
 def test_scripted_case_2_reads_a_page_requests_the_reference_and_two_probes():
@@ -230,10 +230,11 @@ def test_cases_10_and_12_need_their_part():
 
 
 def test_agent_cases_wait_for_the_operator_and_keep_a_short_note():
-    answers = iter(["", "Warden asked 9 times; approved 7\x1b[31m" + "x" * 900])
+    answers = iter(["", "agent asked 9 times; approved 7\x1b[31m" + "x" * 900])
     said = []
     record = labcases.run_case(
-        labcases.CASES[20], context(ask=lambda _p: next(answers), say=said.append, label="warden")
+        labcases.CASES[20],
+        context(ask=lambda _p: next(answers), say=said.append, label="careful agent"),
     )
     assert record["dry_run_only"] is True and record["sent"] == 0
     assert len(record["note"]) == labcases.MAX_NOTE_CHARS
@@ -678,7 +679,7 @@ def test_logrotate_rotates_the_access_log_by_size_and_often():
 
 def test_the_runbook_keeps_case_20_in_dry_run():
     # Since Nov 18, 2026 the Mac runs 6B's scripted cases (Paul's call: a block
-    # only drops traffic into CT 110). Case 20, Warden from the Mac, stays dry-run.
+    # only drops traffic into CT 110). Case 20, the careful agent from the Mac, stays dry-run.
     runbook = (REPO / "docs" / "lab-runbook.md").read_text()
     dry, enforcing = runbook.split("### 6B", 1)
     assert "lurewall lab case 20 --from mac" in dry
