@@ -566,7 +566,7 @@ HTTP = sig.classifier(shipped=True)
 
 def test_the_shipped_lab_config_is_plain_http_at_the_lab_address():
     assert HTTP.config.https is False
-    assert HTTP.config.hosts == frozenset({"192.168.1.160"})
+    assert HTTP.config.hosts == frozenset({"192.0.2.160"})
 
 
 @pytest.mark.parametrize("value", ["cross-site", "Cross-Site", "same-origin", "none", "x"])
@@ -584,12 +584,12 @@ def test_on_plain_http_the_fetch_metadata_header_is_ignored_and_logged(value):
 def test_on_plain_http_the_referer_still_marks_a_request_cross_site():
     result = HTTP.classify(sig.rec("/.env", referer="http://evil.example/frame.html"))
     assert result.cross_site == "referer" and result.attack == ()
-    same = HTTP.classify(sig.rec("/.env", referer="http://192.168.1.160/docs/"))
+    same = HTTP.classify(sig.rec("/.env", referer="http://192.0.2.160/docs/"))
     assert same.cross_site is None and sig.keys(same.attack) == ["path:*/.env"]
 
 
 def test_on_plain_http_asset_loads_are_still_ordinary_browsing():
-    result = HTTP.classify(sig.rec("/assets/site.css", referer="http://192.168.1.160/"))
+    result = HTTP.classify(sig.rec("/assets/site.css", referer="http://192.0.2.160/"))
     assert result.asset and result.behavior == ()
 
 

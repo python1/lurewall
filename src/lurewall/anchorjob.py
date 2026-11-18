@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""The Mac-side checkpoint job: pull the lab's signed checkpoint and keep it.
+"""The checkpoint job on test machine A: pull the lab's signed checkpoint and keep it.
 
-Run on a schedule on the Mac (launchd, see deploy/mac/). Each run:
+Run on a schedule on test machine A (launchd, see deploy/launchd/). Each run:
 
 1. fetches the checkpoint from the lab site over plain HTTP (a private address
    only, size capped);

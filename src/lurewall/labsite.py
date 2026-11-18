@@ -140,7 +140,7 @@ TEXT_MODE_NOTICE = (
 MARKER_HEADER = "marker-header-plover"
 MARKER_HEADER_NAME = "X-Lab-Marker"
 
-# The signed checkpoint, served so the Mac can pull it (runbook, Phase 4).
+# The signed checkpoint, served so test machine A can pull it (runbook, Phase 4).
 CHECKPOINT_ROUTE = "/lurewall-checkpoint.json"
 
 # RFC 9116. Carries canary C when the installation has the quiet canaries.

@@ -139,7 +139,7 @@ def _build_parser() -> argparse.ArgumentParser:
     clear = alert_commands.add_parser("clear", help="clear the standing alert once reviewed")
     clear.add_argument("--state", required=True, type=Path, help=engine_state_help)
 
-    lab = commands.add_parser("lab", help="the lab test harness (run on the Mac or Alienware)")
+    lab = commands.add_parser("lab", help="the lab test harness (run on test machine A or B)")
     lab_commands = lab.add_subparsers(dest="lab_command", required=True)
     lab_commands.add_parser("list", help="list the test cases")
     case = lab_commands.add_parser(
@@ -149,9 +149,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     case.add_argument("number", type=int, help="the case number (1-20)")
     case.add_argument(
-        "--from", dest="source", required=True, help="mac, alienware, or this machine's LAN IP"
+        "--from",
+        dest="source",
+        required=True,
+        help="machine-a, machine-b, or this machine's LAN IP",
     )
-    case.add_argument("--target", default="http://192.168.1.160", help="the lab site")
+    case.add_argument("--target", default="http://192.0.2.160", help="the lab site")
     case.add_argument("--ledger", type=Path, help="the run ledger (default ~/lurewall-lab)")
     case.add_argument("--label", default="", help="agent, model and version, for agent cases")
     case.add_argument("--part", default="", help="cases 10 and 12: which half of the case")
@@ -187,7 +190,7 @@ def _build_parser() -> argparse.ArgumentParser:
     checkpoint_commands = checkpoint.add_subparsers(dest="checkpoint_command", required=True)
     pull = checkpoint_commands.add_parser(
         "pull",
-        help="fetch the lab's checkpoint, check it, store and commit it (Mac job)",
+        help="fetch the lab's checkpoint, check it, store and commit it (machine A job)",
         description=(
             "Exit status: 0 stored or unchanged, 1 refused (bad signature, a different "
             "checkpoint for a stored sequence number, or one that went backwards), "
@@ -195,7 +198,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     pull.add_argument(
-        "--url", default="http://192.168.1.160/lurewall-checkpoint.json", help="checkpoint URL"
+        "--url", default="http://192.0.2.160/lurewall-checkpoint.json", help="checkpoint URL"
     )
     pull.add_argument("--pubkey", required=True, help="the published public key, or a file")
     pull.add_argument("--repo", required=True, type=Path, help="local checkpoints repository")

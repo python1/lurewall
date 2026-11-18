@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Lurewall lab: pull the signed checkpoint from CT 110 every five minutes.
+  Lurewall lab: pull the signed checkpoint from the lab container every five minutes.
 
   Install (runbook, Phase 4): replace YOU with your macOS user name and
   PUBKEY with the lab's public key (64 hex characters, from `lurewall pubkey`),
@@ -18,11 +18,11 @@
     <string>org.lurewall.checkpoint-pull</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/YOU/python1/lurewall/.venv/bin/lurewall</string>
+        <string>/Users/YOU/lurewall/.venv/bin/lurewall</string>
         <string>checkpoint</string>
         <string>pull</string>
         <string>--url</string>
-        <string>http://192.168.1.160/lurewall-checkpoint.json</string>
+        <string>http://192.0.2.160/lurewall-checkpoint.json</string>
         <string>--pubkey</string>
         <string>PUBKEY</string>
         <string>--repo</string>

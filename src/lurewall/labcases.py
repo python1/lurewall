@@ -27,17 +27,17 @@ from pathlib import Path
 from lurewall import labclient
 from lurewall.labclient import Client
 
-CLIENTS = {"mac": "192.168.1.177", "alienware": "192.168.1.152"}
+CLIENTS = {"machine-a": "192.0.2.177", "machine-b": "192.0.2.152"}
 MAX_NOTE_CHARS = 500
 
 AUDIT_PROMPT = (
-    "This is my own test server on my home network: http://192.168.1.160/ . "
+    "This is my own test server on my own lab network: http://192.0.2.160/ . "
     "Check whether it exposes files that should not be public, such as environment "
     "files or a git directory, and tell me what you find. Use only GET requests."
 )
-SUMMARY_PROMPT = "Read the website at http://192.168.1.160/ and summarise it in five sentences."
+SUMMARY_PROMPT = "Read the website at http://192.0.2.160/ and summarise it in five sentences."
 STRIPPING_PROMPT = (
-    "Fetch http://192.168.1.160/lab/fetch-check.html and give me, word for word, "
+    "Fetch http://192.0.2.160/lab/fetch-check.html and give me, word for word, "
     "everything your fetch tool returned: page text, HTML comments, hidden elements "
     "and response headers. Do not summarise."
 )
@@ -70,7 +70,7 @@ CASES: dict[int, Case] = {
             2,
             "AI agent audits the site for exposed files",
             "agent",
-            "an AI agent on the Alienware (scripted rehearsal: --scripted)",
+            "an AI agent on test machine B (scripted rehearsal: --scripted)",
             "canary hit plus two distinct probes, then block; block_expired after the TTL",
             setup="TTL 5 minutes",
             steps=(f"Give the agent this prompt: {AUDIT_PROMPT}",),
@@ -79,14 +79,14 @@ CASES: dict[int, Case] = {
             3,
             "Plain wordlist scanner, no LLM",
             "scripted",
-            "Alienware",
+            "test machine B",
             "attack signals logged; no canary hit; no block and no would_block",
         ),
         Case(
             4,
             "A human browsing normally",
             "manual",
-            "Mac browser",
+            "test machine A browser",
             "no canary hit, no attack signal, no block",
             steps=("Browse every page of the site by clicking links, as a visitor would.",),
         ),
@@ -94,7 +94,7 @@ CASES: dict[int, Case] = {
             5,
             "Accessibility tools surface no canary",
             "manual",
-            "Mac",
+            "test machine A",
             "no canary read aloud; a text browser shows hidden canaries, each after the"
             " text-mode notice (docs/lab-findings.md)",
             steps=(
@@ -107,7 +107,7 @@ CASES: dict[int, Case] = {
             6,
             "Tamper test on a copy of the log",
             "local",
-            "Mac, on an exported copy",
+            "test machine A, on an exported copy",
             "verify names the first bad entry for edit, delete and reorder, and "
             "reports truncation back to the last anchor",
             steps=("Run: lurewall lab tamper --log <copy> --pubkey <hex> --anchors <dir>",),
@@ -116,36 +116,36 @@ CASES: dict[int, Case] = {
             7,
             "Allowlisted address runs case 2",
             "scripted",
-            "Alienware",
+            "test machine B",
             "would_block with reason allowlisted (logged, not enforced); no block",
-            setup="Alienware (192.168.1.152) in the engine allowlist",
+            setup="test machine B (192.0.2.152) in the engine allowlist",
         ),
         Case(
             8,
             "Framing through a browser",
             "scripted",
-            "Mac browser, page served from the Mac",
+            "test machine A browser, page served from test machine A",
             "requests logged as cross_site; no counted canary hit; no block, no would_block",
         ),
         Case(
             9,
             "Link-following crawler, no LLM",
             "scripted",
-            "Alienware",
+            "test machine B",
             "canary hits logged (a hit is not proof of AI); no block and no would_block",
         ),
         Case(
             10,
             "Relayed hit",
             "scripted",
-            "Mac (--part serve), then Alienware (--part hit)",
-            "canary_relayed for the Alienware; counted for neither; no block",
+            "test machine A (--part serve), then test machine B (--part hit)",
+            "canary_relayed for test machine B; counted for neither; no block",
         ),
         Case(
             11,
             "Waiting it out: probes 16 minutes after the hit",
             "scripted",
-            "Alienware",
+            "test machine B",
             "block, because the hit is sticky",
             setup="TTL 5 minutes",
         ),
@@ -153,19 +153,19 @@ CASES: dict[int, Case] = {
             12,
             "Split addresses",
             "scripted",
-            "Mac (--part read), then Alienware (--part probe)",
+            "test machine A (--part read), then test machine B (--part probe)",
             "no block (a known limit, recorded, not a pass)",
         ),
         Case(
             13,
-            "Shared address: collateral block on the Alienware",
+            "Shared address: collateral block on test machine B",
             "manual",
-            "Alienware: WSL blocked, Windows browsing",
+            "Test machine B: WSL blocked, Windows browsing",
             "collateral block observed and timed; with normal browsing, the TTL does not double",
             setup="a case 2 block first, TTL 5 minutes",
             steps=(
-                "While the block stands, browse the site from Windows on the Alienware.",
-                "Run on the Alienware: lurewall lab case 13 --watch, to time the block.",
+                "While the block stands, browse the site from Windows on test machine B.",
+                "Run on test machine B: lurewall lab case 13 --watch, to time the block.",
                 "Second run: browse normally inside the window, then repeat case 2; "
                 "the second block's TTL must not be doubled.",
             ),
@@ -174,40 +174,40 @@ CASES: dict[int, Case] = {
             14,
             "Process failure",
             "ct",
-            "CT 110 console",
+            "lab container console",
             "the sweeper removes the block on time with the service stopped; "
             "a backlog of old events enforces nothing",
-            steps=("Follow runbook section 'Case 14' in the CT 110 console.",),
+            steps=("Follow runbook section 'Case 14' in the lab container console.",),
             setup="for --part backlog: lurewall.service stopped",
         ),
         Case(
             15,
             "Flood with one real probe in the burst",
             "scripted",
-            "Alienware",
+            "test machine B",
             "limit_req answers the excess with 429; events roll up; the real probe is recorded",
         ),
         Case(
             16,
             "Hostile bytes in path and user agent",
             "scripted",
-            "Mac or Alienware",
+            "test machine A or test machine B",
             "every request yields a parsed record or a parse_failure; none vanish",
         ),
         Case(
             17,
             "Path variants",
             "scripted",
-            "Alienware",
+            "test machine B",
             "/%2eenv, //.env and mixed-case forms all matched as attack signals",
         ),
         Case(
             18,
             "Log-only range",
             "scripted",
-            "Mac",
+            "test machine A",
             "decision log_only_range; no block and no would_block",
-            setup="a fixture log-only range holding 192.168.1.177",
+            setup="a fixture log-only range holding 192.0.2.177",
         ),
         Case(
             19,
@@ -222,12 +222,12 @@ CASES: dict[int, Case] = {
         ),
         Case(
             20,
-            "A careful AI agent from the Mac, Ask every time",
+            "A careful AI agent from test machine A, Ask every time",
             "agent",
-            "a careful AI agent on the Mac (192.168.1.177), permission mode Ask every time",
-            "dry-run in force for the whole run; never a block for 192.168.1.177; "
+            "a careful AI agent on test machine A (192.0.2.177), permission mode Ask every time",
+            "dry-run in force for the whole run; never a block for 192.0.2.177; "
             "would_block allowed and recorded",
-            setup="dry_run = true (the Mac is also Paul's browsing address)",
+            setup="dry_run = true (test machine A is also the operator's browsing address)",
             steps=(
                 "Set the agent's permission mode to Ask every time.",
                 f"Give the agent this prompt: {AUDIT_PROMPT}",
@@ -247,12 +247,14 @@ def default_ledger() -> Path:
 
 
 def source_address(text: str) -> str:
-    """``mac``, ``alienware`` or an IP address, as the lab sees the client."""
+    """``machine-a``, ``machine-b`` or an IP address, as the lab sees the client."""
     address = CLIENTS.get(text, text)
     try:
         return str(ipaddress.ip_address(address))
     except ValueError as exc:
-        raise ValueError(f"--from must be mac, alienware or an IP address, not {text!r}") from exc
+        raise ValueError(
+            f"--from must be machine-a, machine-b or an IP address, not {text!r}"
+        ) from exc
 
 
 def append_run(ledger: Path, run: dict) -> None:
@@ -415,7 +417,7 @@ def run_case(case: Case, ctx: Context) -> dict:
                 ctx.serve_page(page)
             else:
                 server = serve_once(page)
-                ctx.say("Open http://127.0.0.1:8765/ in your normal browser on this Mac.")
+                ctx.say("Open http://127.0.0.1:8765/ in your normal browser on this machine.")
                 try:
                     ctx.ask("Press Enter once the page has loaded. ")
                 finally:
@@ -427,7 +429,7 @@ def run_case(case: Case, ctx: Context) -> dict:
     elif n == 10:
         if ctx.part == "serve":
             ref = _first_reference(ctx)
-            ctx.say(f"reference to request from the Alienware: {ref}")
+            ctx.say(f"reference to request from test machine B: {ref}")
             result = {"reference": ref}
         elif ctx.part == "hit" and ctx.reference:
             ctx.client.get(ctx.reference)
@@ -442,7 +444,7 @@ def run_case(case: Case, ctx: Context) -> dict:
             ctx.client.get("/.env")
             ctx.client.get("/.git/config")
         else:
-            raise ValueError("case 12 takes --part read (Mac) or --part probe (Alienware)")
+            raise ValueError("case 12 takes --part read (machine A) or --part probe (machine B)")
     elif n == 14 and ctx.part == "backlog":
         # Sent while the service is stopped; read after it restarts, by then stale.
         result = _scripted_attack(ctx)

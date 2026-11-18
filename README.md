@@ -438,12 +438,12 @@ them (`content_reader_cross_site_probes_not_counted`).
 ## The lab harness
 
 The lab runbook is [docs/lab-runbook.md](docs/lab-runbook.md). It covers
-install in CT 110, the twenty test cases and the results export.
+install in the lab container, the twenty test cases and the results export.
 
 ```sh
 lurewall lab list                                   # the twenty cases
-lurewall lab case 3 --from alienware                # run one, record it in the ledger
-lurewall checkpoint pull --pubkey KEY --repo DIR    # Mac job: fetch, check, commit
+lurewall lab case 3 --from machine-b                # run one, record it in the ledger
+lurewall checkpoint pull --pubkey KEY --repo DIR    # test machine A job: fetch, check, commit
 lurewall lab results --log LOG --pubkey KEY --anchors DIR --ledger L --out OUT
 lurewall lab tamper --log COPY --pubkey KEY --anchors DIR --work DIR   # case 6
 ```

@@ -942,13 +942,13 @@ def test_config_values_are_read():
     config = engineconfig.parse(
         "version = 1\ndry_run = false\n[canary]\nsticky_days = 3\nid_ttl_hours = 2\n"
         "[block]\nttl_minutes = 5\nmax_ttl_minutes = 40\ncap = 7\n"
-        '[sources]\nallowlist = ["192.168.1.0/24", "2001:db8::1"]\n'
+        '[sources]\nallowlist = ["192.0.2.0/24", "2001:db8::1"]\n'
         'log_only_ranges = ["203.0.113.0/24"]\n'
         "[limits]\nmax_hit_sources = 9\nmax_issued_ids = 8\nmax_ids_per_source = 2\n"
     )
     assert (config.sticky_ms, config.id_ttl_ms) == (3 * DAY, 2 * HOUR)
     assert (config.ttl_ms, config.max_ttl_ms, config.cap) == (5 * MINUTE, 40 * MINUTE, 7)
-    assert config.allowlist == nets("192.168.1.0/24", "2001:db8::1/128")
+    assert config.allowlist == nets("192.0.2.0/24", "2001:db8::1/128")
     assert config.log_only == nets("203.0.113.0/24")
     assert (config.max_hit_sources, config.max_issued_ids, config.max_ids_per_source) == (9, 8, 2)
 

@@ -97,7 +97,7 @@ jobs:
             "$(command -v python)" -m pytest tests/test_nft.py -v -p no:cacheprovider
 
   debian13:
-    # CT 110 runs Debian 13 (trixie): nftables 1.1.3, nginx 1.26, Python 3.13.
+    # The lab container runs Debian 13 (trixie): nftables 1.1.3, nginx 1.26, Python 3.13.
     # The real-nft, real-nginx and lab end-to-end tests again, on those exact
     # packages, inside a trixie container. The container has its own network
     # namespace; NET_ADMIN applies to that namespace only, never the runner's.

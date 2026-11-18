@@ -10,7 +10,7 @@ Requests are written byte for byte on a socket, not through an HTTP library,
 so a test can send exactly the path it means (``//.env``, ``/%2eenv``, invalid
 UTF-8) without a library normalising it first.
 
-Standard library only: this runs on the Mac and on the Alienware (WSL), which
+Standard library only: this runs on test machine A and on test machine B (WSL), which
 need no more than Python 3.11 and this package.
 """
 
@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-DEFAULT_TARGET = "http://192.168.1.160"
+DEFAULT_TARGET = "http://192.0.2.160"
 USER_AGENT = "lurewall-lab-harness/1 (lab test client; harmless requests only)"
 MAX_RESPONSE_BYTES = 1024 * 1024
 TIMEOUT_S = 10.0
