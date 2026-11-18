@@ -74,9 +74,10 @@ Rules:
   paths.
 - **Added:** a quiet decoy carries no request ID, so a hit is bound by the page
   that carried it. It counts only if the same source was served that page (B: any
-  content page; A: robots.txt; C: security.txt) as a non-cross-site GET or HEAD
-  in the last 24 hours. Otherwise it is logged as `canary_unbound` with reason
-  `not_served` or `expired_served`.
+  content page; A: robots.txt; C: security.txt) as a non-cross-site GET in the
+  last 24 hours. Otherwise it is logged as `canary_unbound` with reason
+  `not_served` or `expired_served`. A HEAD of the page binds nothing, because
+  it returns no body; a GET or HEAD to the decoy itself still counts.
 
 ## 3. Log and result changes
 
