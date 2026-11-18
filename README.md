@@ -112,7 +112,8 @@ are tracked in issue #14.
   only if the same address (an IPv4 address or an IPv6 /64) loaded the page
   that carries that canary within the last 24 hours. For B that is any
   content page, for A robots.txt, and for C security.txt. The page load must
-  be a GET or HEAD that is not cross-site. **A guessed or shared path doesn't
+  be a GET that is not cross-site: a HEAD of the page returns no body, so it
+  carries no canary and binds nothing. **A guessed or shared path doesn't
   count:** a request from an address that never loaded the page is logged as
   `canary_unbound` (`not_served`, or `expired_served` after 24 hours) and
   counts for nobody. The bindings are kept in memory only, so after a restart

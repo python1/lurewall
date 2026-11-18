@@ -195,9 +195,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "pull",
         help="fetch the lab's checkpoint, check it, store and commit it (machine A job)",
         description=(
-            "Exit status: 0 stored or unchanged, 1 refused (bad signature, a different "
-            "checkpoint for a stored sequence number, or one that went backwards), "
-            "2 not fetched."
+            "Exit status: 0 stored or unchanged; 1 refused (bad signature, a different "
+            "checkpoint for a stored sequence number, or one that went backwards) or "
+            "a later step failed (stamp_failed: the OpenTimestamps stamp; stage_failed "
+            "or commit_failed: git add or git commit; push_failed: git push, or --push "
+            "with no git repository); 2 not fetched or bad arguments."
         ),
     )
     pull.add_argument(
