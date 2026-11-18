@@ -95,7 +95,8 @@ CASES: dict[int, Case] = {
             "Accessibility tools surface no canary",
             "manual",
             "Mac",
-            "no canary text read aloud or shown; any tool that shows one is recorded",
+            "no canary read aloud; a text browser shows hidden canaries, each after the"
+            " text-mode notice (docs/lab-findings.md)",
             steps=(
                 "On every page: VoiceOver (Cmd-F5), reader mode, a text browser "
                 "(lynx or w3m) and an AI page describer if you use one.",
