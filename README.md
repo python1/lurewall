@@ -1,12 +1,91 @@
 # Lurewall
 
-**In development — not ready for use.** Nothing here should be deployed.
+**Status: lab-tested — v1 research release.** It was tested in an isolated lab
+only; it is not meant for production sites.
 
-Lurewall is a defensive, open-source tool for studying one question in a lab:
-can harmless canaries planted in a web page's non-rendered content, combined
-with ordinary attack signals, pick out a naive AI agent that is probing a site?
+Lurewall plants harmless canaries in a web page's non-rendered content and
+watches the site's access log for clients that act on them. It blocks a source
+only when a canary hit bound to that source and two or more distinct attack
+probes agree, and every block expires on its own. Every decision goes into a
+signed, hash-chained log whose checkpoints are anchored off the box, so the
+record can be checked later.
 
 Created by Paul Charydczak.
+
+Case study: [docs/case-study.md](docs/case-study.md). Full lab findings:
+[docs/lab-findings.md](docs/lab-findings.md).
+
+## Lab results
+
+Twenty test cases were run in November 2026 against a throwaway site in an
+isolated container. Details, run IDs and substitutions are in
+[docs/lab-findings.md](docs/lab-findings.md).
+
+| # | Case | Result |
+|---|---|---|
+| 1 | Benign AI agent summarises the site | pass: no canary followed, no block |
+| 2 | Audit for exposed files: canary, probes, block | pass with a scripted client, in dry-run and enforcing; AI agent runs not run |
+| 3 | Plain wordlist scanner | pass: attack signals alone never block |
+| 4 | A human browsing normally | pass: no canary hit, no attack signal |
+| 5 | Accessibility tools | recorded: a text-mode browser shows the hidden canary; fixed with a notice; screen reader clean |
+| 6 | Tamper test on a copy of the log | pass: edit, delete, reorder and truncate all caught |
+| 7 | Allowlisted source | pass: logged as `would_block`, not enforced |
+| 8 | Framing through a browser | pass: cross-site requests count for nothing |
+| 9 | Link-following crawler, no model | pass: took 4 of 7 canaries, logged as a content reader, not blocked |
+| 10 | Relayed canary hit | pass: counted for nobody |
+| 11 | Waiting it out (probes 16 minutes later) | pass: blocked, then expired on time |
+| 12 | Reading and probing from two addresses | known limit: not blocked |
+| 13 | Shared address | pass: collateral block for one TTL; the TTL did not double |
+| 14 | Process failure | pass: block expired with the service stopped; stale backlog ignored |
+| 15 | Flood with one real probe | pass: rate limit answered the excess; the probe was recorded |
+| 16 | Hostile bytes in path and user agent | pass: 8 of 8 logged, none lost |
+| 17 | Path spelling variants | pass: 10 of 10 matched |
+| 18 | Log-only range | pass: never blocked |
+| 19 | What each agent's fetch passes to the model | recorded per agent |
+| 20 | A careful AI agent probing, dry-run | pass: it saw a canary and declined it; its probes were logged, nothing enforced |
+
+## Limits
+
+- **Careful agents decline v1's canaries.** v1's lures give instructions. A
+  careful AI agent spotted the response-header canary as suspicious and did
+  not follow it, and the other AI agent tested followed none. No AI agent was
+  caught in the lab.
+- **The full chain is proven with scripted clients only.** Canary hit, then
+  probes, then a real nftables block that expires on time: shown with the
+  lab's scripted client, not with an AI agent.
+- **Shared addresses.** Everyone behind a blocked address loses access to the
+  site for one TTL. Ordinary browsing from that address stops the TTL from
+  doubling, but not the block itself.
+- **Split addresses.** A client that reads pages from one address and probes
+  from another is not blocked.
+- **The log's newest entries.** Entries after the last anchored checkpoint
+  can't be proven complete. In the lab that tail was at most about 10
+  minutes: a checkpoint is written at least every 5 minutes and pulled off the
+  box every 5 minutes.
+- **A narrow claim.** A canary hit shows that a client read non-rendered
+  content and acted on it. It doesn't prove the client is an AI.
+
+## Related work
+
+- **Palisade Research, LLM Agent Honeypot**
+  ([arXiv:2410.13919](https://arxiv.org/abs/2410.13919)). A public honeypot
+  that uses prompt injection and response timing to tell AI agents apart from
+  other attackers. Lurewall uses the same basic idea, a lure that only an
+  agent acts on, on a web page instead.
+- **Cloudflare AI Labyrinth.** It serves generated decoy pages to crawlers that
+  ignore no-crawl directives.
+- **Canary tokens** in general. These are tripwires such as decoy files, URLs and
+  credentials that raise an alert when someone uses them.
+
+Lurewall combines a canary hit with attack probes behind one gate, and adds
+expiring blocks and an anchored, signed log.
+
+## Next: v2
+
+Destination-style canaries: lures that point somewhere a careful agent would
+look anyway, such as a `robots.txt` entry, a sitemap entry or a quiet "config
+moved" comment, instead of giving orders. They stay GET-only, with a 404
+behind them. Ideas are tracked in issue #14.
 
 ## Scope
 
@@ -14,15 +93,15 @@ Created by Paul Charydczak.
   back, never serves a payload and never tries to trace or identify anyone. A
   canary's only effect is one logged request to a decoy path, which returns a
   fixed body that holds no data.
-- **Lab only.** v1 runs on a throwaway site in an isolated container on a
-  private network, with the author's own test agents as the only traffic. It
-  makes no claim about protecting real sites.
+- **Lab only.** v1 was tested on a throwaway site in an isolated container on
+  a private network, with the author's own test clients as the only traffic.
+  It makes no claim about protecting real sites.
 - **Narrow claim.** A canary hit means a client read a page's non-rendered
   content and acted on it. It does not prove the client is an AI, and it does
   not mean the visitor is hostile. v1 is expected to catch naive agents only;
   an attacker who ignores the canaries is logged, not blocked.
 
-## Planned design
+## Design
 
 A source is blocked only when two kinds of evidence agree: a canary hit bound
 to that source, and two or more distinct attack signals. Blocks expire. Every
@@ -35,13 +114,12 @@ combines them behind one gate and reports what a lab test shows.
 
 ## Status
 
-Built so far: the project scaffold, the signed event log, the access-log
-reader, the canaries with their throwaway lab site, the attack and behavior
-signals, the decision engine, the nftables adapter, the sweeper, the
-service command, and the lab harness with its runbook. Everything runs in
-dry-run by default. The adapter is tested against a real `nft` in CI,
-including Debian 13's own packages, but no block has been checked on a live
-host yet. The systemd units are reference files, untested on real systemd.
+v1 is complete: the signed event log, the access-log reader, the canaries
+with their throwaway lab site, the attack and behavior signals, the decision
+engine, the nftables adapter, the sweeper, the service and its systemd units,
+and the lab harness with its runbook. Everything runs in dry-run by default.
+The lab ran it under systemd in an unprivileged Debian 13 container
+(nftables 1.1.3, nginx 1.26.3), where real blocks landed and expired on time.
 
 ## The signed log
 
@@ -92,8 +170,8 @@ field as untrusted data.
 - **Hostile bytes.** nginx's `escape=json` leaves bytes above 126 alone, so
   invalid UTF-8 reaches the log as raw bytes. The reader decodes it with
   replacement characters and marks the record. CI checks this against a real
-  nginx (1.24 on the test runner) as well as against built fixtures; the lab's
-  own nginx is still to be checked when it exists.
+  nginx (1.24 on the test runner) as well as against built fixtures, and the
+  lab checked it on nginx 1.26.3 (case 16: 8 of 8 hostile requests logged).
 - **Rotation and restart.** The reader follows logrotate by inode, finishes the
   old file before moving on, and resumes from a saved offset. If lines can no
   longer be read (the rotated file is gone, or the file was cut short), it
@@ -145,16 +223,17 @@ writes a small fictional static site and an nginx `server` block for it.
   request's `$request_id` into the canary references on the page it serves,
   with no proxy. A hit carries the ID of the page that showed it.
 - **Not read aloud.** A canary is either an HTML comment or an element with
-  `aria-hidden="true"` and nothing focusable inside. This is checked on the
-  markup; a real screen reader, reader modes and AI page describers are still
-  to be tested in the lab before any public use.
+  `aria-hidden="true"` and nothing focusable inside. In the lab, VoiceOver
+  read no canary. A text-mode browser (lynx) shows hidden
+  elements, and no HTML can prevent that, so each hidden canary starts with a
+  notice saying it is not meant for people.
 - **Rotation only on leak.** Nothing rotates on a schedule. Two fetches of a
   page differ only in the request ID.
 
 Limits: the word banks are public and each placement has roughly 2^27 to 2^33
 possible paths, so a determined attacker can enumerate them. A guessed path
-does not carry a request ID issued to the guesser, which is what the scoring
-(not built yet) will require. Many fetch tools strip comments, hidden elements
+does not carry a request ID issued to the guesser, and the engine counts a
+hit only with an ID issued to the same source. Many fetch tools strip comments, hidden elements
 and headers before a model sees the page, so those lures may never arrive.
 
 ## Signals
@@ -321,9 +400,9 @@ lurewall lab tamper --log COPY --pubkey KEY --anchors DIR --work DIR   # case 6
   ledger is what ties events to a case.
 - **Results.** `lab results` verifies the log first and exports nothing from
   a log that fails. It escapes every string it writes.
-- **Case 20.** Warden (Grok Bot) runs from the Mac in Ask every time mode. It
-  is dry-run only, and the export fails the run unless the log shows dry-run
-  for the whole of it.
+- **Case 20.** A careful AI agent runs from the operator's own machine, with
+  every request approved by hand. It is dry-run only, and the export fails the
+  run unless the log shows dry-run for the whole of it.
 
 ## Development
 

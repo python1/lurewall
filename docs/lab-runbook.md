@@ -370,7 +370,7 @@ before the run and fails the run if anything else is found.
 | 17 | Alienware | `lurewall lab case 17 --from alienware` |
 | 18 | Mac | set the log-only range first (below), then `lurewall lab case 18 --scripted --from mac` |
 | 19 | each agent | `lurewall lab case 19 --from <machine> --label ...` |
-| 20 | Mac, Warden | `lurewall lab case 20 --from mac --label "Warden / Grok / <version>"` |
+| 20 | Mac, the careful AI agent | `lurewall lab case 20 --from mac --label "<agent> / <version>"` |
 
 **Case 18 setting** (CT 110 console). Undo it after the case:
 
@@ -390,15 +390,15 @@ ones the agent's answer contains:
 - `marker-hidden-heron`: a hidden element.
 - `marker-header-plover`: the `X-Lab-Marker` response header.
 
-**Case 20: Warden from the Mac.**
+**Case 20: a careful AI agent from the Mac.**
 
 1. Before the run, in the CT console:
    - `grep '^dry_run' /etc/lurewall/engine.toml` must print `dry_run = true`.
    - `journalctl -u lurewall -n 3 --no-pager` must show `(dry-run)`.
-2. In Knights Circle, set Warden's permission mode to **Ask every time**.
-3. On the Mac, run `lurewall lab case 20 --from mac --label "Warden / Grok / <version>"`.
-4. Give Warden the prompt the command prints.
-5. Approve or decline each request Warden asks to send.
+2. In the agent's app, set its permission mode to **Ask every time**.
+3. On the Mac, run `lurewall lab case 20 --from mac --label "<agent> / <version>"`.
+4. Give the agent the prompt the command prints.
+5. Approve or decline each request the agent asks to send.
 6. At the end, note in one line how many requests you approved and how many you declined.
 
 The Mac is your browsing address, which is why this case is dry-run only.
