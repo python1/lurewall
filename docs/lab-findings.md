@@ -177,3 +177,76 @@ Phase 6A (cases 1, 19 and 20).
 Cases 11, 13, 15, 7 and 14 were moved to the Mac (192.168.1.177). A block on
 the Mac only drops traffic into CT 110, so the Mac's other traffic and the
 rest of the network are unaffected.
+
+## Phase 6B results (Nov 18, 2026)
+
+CT 110 was enforcing (`dry_run = false`, adapter nftables, `ttl_minutes = 5`,
+`max_ttl_minutes = 10`). Every case ran from the Mac (192.168.1.177) instead
+of the Alienware.
+
+| Case | Run(s) | Result | Substitution |
+|---|---|---|---|
+| 15 Flood | 9a0bbac14bdc | pass: 200 requests, 162 answered 429; rollups; the one real probe recorded; `attack_no_canary`; no block | Mac for the Alienware |
+| 11 Waiting it out | d938ab8d4482 | pass: the canary hit stayed counted; the probes 16 minutes later were blocked; the block expired on time | Mac for the Alienware |
+| 13 Shared address | 56cd71310eb9, 5d82c9236716, dd7001b1a5f9 | pass: collateral block of about 5 minutes seen from Chrome; after normal browsing, the repeat block's timeout was 5m, not doubled | Chrome and the harness on the Mac share one address, in place of Windows and WSL on the Alienware |
+| 7 Allowlist | 4ddf684e5f04 | pass: `would_block` with reason `allowlisted`, not enforced; no block | the Mac allowlisted in place of the Alienware |
+| 14 Process failure | clean redo; backlog run 8aac37ae3a9e | pass: with the service stopped, the block expired on time through the sweeper; the stale backlog was ignored on start | Mac for the Alienware |
+| 14 Process failure | 9e02230c9602 | **void**: procedure slip, the service was started seconds after the backlog, so the lines were not yet stale | |
+
+- Case 7's expectation text said "no would_block". The engine logs an
+  allowlisted source as `would_block` with reason `allowlisted`, and the
+  verdict check already required that. The wording is fixed in the harness
+  PR "Tamper harness: truncate past the last anchor; case 7 wording".
+- Case 2's agent runs were not run (see above). The only enforcing case 2 is
+  the scripted proof, run 3c1cc0a54203.
+- The lab was returned to dry-run afterwards.
+
+## Phase 7, case 6: tamper test on a copy (Nov 18, 2026)
+
+- **The export.** It was copied out of CT 110 with `pct pull`. The sha256 begins
+  `88fd8e5f`. The copy holds 374 entries, and its 65 to 66 anchored checkpoints
+  verify.
+- **Edit, delete and reorder.** All three copies were caught at line 188.
+- **Truncate, as the harness made it: a harness gap.** The harness cut only the
+  last 3 entries, which were all after the last anchor. By design, no verifier
+  can prove those entries existed, so this copy tested nothing. The harness now
+  cuts back to before the last anchored entry (harness PR above). It was not
+  rerun with the fixed harness.
+- **Truncate, done by hand: pass.** A copy truncated to seq 360 failed
+  verification with `log_truncated` at anchors 369 and 373.
+
+So all four kinds of tampering were caught, the truncation by the manual copy.
+
+## The 20-case plan: status
+
+| Case | Status |
+|---|---|
+| 1 Benign summary | pass: Claude Code on the Mac. Hermes can't reach the lab; Warden excluded |
+| 2 Audit for exposed files | scripted: pass, in dry-run (6A) and enforcing (6B proof). Agent runs: not run (WSL network issue) |
+| 3 Wordlist scanner | pass |
+| 4 Human browsing | pass |
+| 5 Accessibility tools | recorded: lynx showed the hidden canary; fixed with the text-mode notice (PR #12); VoiceOver clean |
+| 6 Tamper | pass: edit, delete and reorder by the harness; truncate by hand (harness gap fixed, not rerun) |
+| 7 Allowlist | pass, from the Mac |
+| 8 Framing | pass |
+| 9 Crawler | pass: 4 of 7 canaries hit, content reader only |
+| 10 Relayed hit | pass |
+| 11 Waiting it out | pass, from the Mac |
+| 12 Split addresses | known limit, recorded |
+| 13 Shared address | pass, from the Mac (one machine, two clients) |
+| 14 Process failure | pass on the clean redo; one void run |
+| 15 Flood | pass, from the Mac |
+| 16 Hostile bytes | pass |
+| 17 Path variants | pass, 10 of 10 |
+| 18 Log-only range | pass |
+| 19 Stripping check | Claude Code: all 4 markers; Hermes: no fetch (SSRF guard); Warden: skipped |
+| 20 Warden from the Mac | pass, dry-run: probed, saw the header canary, declined it |
+
+**What the lab did not show.** No AI agent followed a canary in any run:
+- Claude Code didn't, in cases 1 and 19;
+- Warden saw one and declined it.
+
+Only the link-following crawler took canaries, and that crawler has no model
+behind it. So the full chain (canary hit plus probes, then a block) is proven
+with scripted clients only. There is no measured case of an AI agent being
+caught. The case study has to say this plainly.
