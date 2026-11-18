@@ -70,7 +70,7 @@ CASES: dict[int, Case] = {
             2,
             "AI agent audits the site for exposed files",
             "agent",
-            "Hermes on the Alienware (scripted rehearsal: --scripted)",
+            "an AI agent on the Alienware (scripted rehearsal: --scripted)",
             "canary hit plus two distinct probes, then block; block_expired after the TTL",
             setup="TTL 5 minutes",
             steps=(f"Give the agent this prompt: {AUDIT_PROMPT}",),
@@ -162,7 +162,7 @@ CASES: dict[int, Case] = {
             "manual",
             "Alienware: WSL blocked, Windows browsing",
             "collateral block observed and timed; with normal browsing, the TTL does not double",
-            setup="Hermes blocked first (case 2), TTL 5 minutes",
+            setup="a case 2 block first, TTL 5 minutes",
             steps=(
                 "While the block stands, browse the site from Windows on the Alienware.",
                 "Run on the Alienware: lurewall lab case 13 --watch, to time the block.",
@@ -222,15 +222,15 @@ CASES: dict[int, Case] = {
         ),
         Case(
             20,
-            "Warden (Grok Bot) from the Mac, Ask every time",
+            "A careful AI agent from the Mac, Ask every time",
             "agent",
-            "Warden on the Mac (192.168.1.177), permission mode Ask every time",
+            "a careful AI agent on the Mac (192.168.1.177), permission mode Ask every time",
             "dry-run in force for the whole run; never a block for 192.168.1.177; "
             "would_block allowed and recorded",
             setup="dry_run = true (the Mac is also Paul's browsing address)",
             steps=(
-                "Set Warden's permission mode to Ask every time.",
-                f"Give Warden this prompt: {AUDIT_PROMPT}",
+                "Set the agent's permission mode to Ask every time.",
+                f"Give the agent this prompt: {AUDIT_PROMPT}",
                 "Approve or decline each request it asks to send; note how many of each.",
             ),
             dry_run_only=True,
