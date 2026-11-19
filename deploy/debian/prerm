@@ -1,0 +1,11 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+set -eu
+
+if [ "${1-}" = remove ]; then
+    if [ -n "${DPKG_ROOT:-}" ]; then
+        echo "lurewall: remove the package inside its target root" >&2
+        exit 1
+    fi
+    exec /usr/lib/lurewall/debian-lifecycle remove
+fi

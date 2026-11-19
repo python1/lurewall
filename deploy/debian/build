@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+"""Build Lurewall's Debian package from a committed application snapshot."""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+CHECKOUT = HERE.parents[1]
+APP = "src/lurewall"
+LIBRARY = Path("usr/lib/lurewall")
+DOC = Path("usr/share/doc/lurewall")
+UNIT_DIR = Path("usr/lib/systemd/system")
+SUBMODULE = Path("third_party/eureka_protocol")
+CRYPTO = "src/eureka_daemon/crypto.py"
+FULL_SHA = re.compile(r"[0-9a-f]{40}", re.ASCII)
+VERSION = re.compile(r"[0-9][0-9A-Za-z.+~-]*", re.ASCII)
+UNITS = {
+    "lurewall.service": "operator",
+    "lurewall-sweeper.service": "operator",
+    "lurewall-sweeper.timer": "systemd",
+    "lurewall-notify.service": "systemd",
+    "lurewall-notify-failure.service": "systemd",
+    "lurewall-notify.timer": "systemd",
+}
+CONFIG_FILES = {
+    "etc/lurewall/engine.toml": "operator/engine.toml",
+    "etc/lurewall/signals.toml": "operator/signals.toml",
+    "etc/lurewall/nginx/operator-format.conf": "nginx/operator-format.conf",
+    "etc/lurewall/systemd/50-enforcement.conf": "operator/50-enforcement.conf",
+    "etc/logrotate.d/lurewall": "operator/lurewall.logrotate",
+}
+ALLOWLIST = "etc/lurewall/allowlist"
+
+
+class BuildError(ValueError):
+    """The package inputs cannot safely be built."""
+
+
+def git(repository: Path, *args: str) -> bytes:
+    binary = shutil.which("git")
+    if binary is None:
+        raise BuildError("git is required to read the committed application source")
+    result = subprocess.run(  # noqa: S603 - Git arguments and object IDs are explicit
+        [binary, "-C", str(repository), *args], capture_output=True, check=False
+    )
+    if result.returncode:
+        raise BuildError(
+            f"git {args[0]} failed in {repository}. "
+            "Check that the source commit and pinned submodule are available locally."
+        )
+    return result.stdout
+
+
+def blob(repository: Path, commit: str, name: str) -> bytes:
+    return git(repository, "show", f"{commit}:{name}")
+
+
+def source_commit(repository: Path, requested: str | None) -> str:
+    if requested is not None and FULL_SHA.fullmatch(requested) is None:
+        raise BuildError("--source-commit must be a full Git commit ID")
+    commit = git(repository, "rev-parse", f"{requested or 'HEAD'}^{{commit}}").decode().strip()
+    if FULL_SHA.fullmatch(commit) is None or (requested is not None and commit != requested):
+        raise BuildError("expected a full source commit ID")
+    return commit
+
+
+def signing_source(repository: Path, commit: str) -> tuple[bytes, bytes]:
+    loader = ast.parse(blob(repository, commit, f"{APP}/_eureka.py"))
+    pins = {}
+    for node in loader.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Constant)
+        ):
+            pins[node.targets[0].id] = node.value.value
+    link = git(repository, "ls-tree", commit, str(SUBMODULE)).decode()
+    match = re.fullmatch(r"160000 commit ([0-9a-f]{40})\tthird_party/eureka_protocol\n", link)
+    if match is None or match[1] != pins.get("EUREKA_COMMIT"):
+        raise BuildError("the source commit's Eureka gitlink does not match its signing pin")
+    crypto = blob(repository / SUBMODULE, match[1], CRYPTO)
+    if hashlib.sha256(crypto).hexdigest() != pins.get("EUREKA_CRYPTO_SHA256"):
+        raise BuildError("the pinned signing source does not match its expected SHA-256")
+    return crypto, blob(repository / SUBMODULE, match[1], "LICENSE")
+
+
+def write_file(path: Path, content: str | bytes, *, executable: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content.encode() if isinstance(content, str) else content)
+    path.chmod(0o755 if executable else 0o644)
+
+
+def copy_application(repository: Path, commit: str, root: Path) -> None:
+    entries = git(repository, "ls-tree", "-r", "-z", commit, APP)
+    for entry in entries.rstrip(b"\0").split(b"\0"):
+        header, _, pathname = entry.partition(b"\t")
+        name = pathname.decode("ascii")
+        if not header.startswith((b"100644 blob ", b"100755 blob ")) or not re.fullmatch(
+            r"src/lurewall/(?:[a-zA-Z0-9_]+/)*[a-zA-Z0-9_]+\.py", name
+        ):
+            raise BuildError("unexpected tracked content in the application package")
+        write_file(root / LIBRARY / name.removeprefix("src/"), blob(repository, commit, name))
+
+
+def copy_operator_files(repository: Path, commit: str, root: Path) -> None:
+    for name, group in UNITS.items():
+        content = blob(repository, commit, f"deploy/{group}/{name}")
+        if name.endswith(".service"):
+            original = b"ExecStart=/opt/lurewall/current/bin/lurewall "
+            if content.count(original) != 1:
+                raise BuildError(f"cannot identify the source operator unit executable for {name}")
+            content = content.replace(original, b"ExecStart=/usr/bin/lurewall ")
+        write_file(root / UNIT_DIR / name, content)
+    for target, origin in CONFIG_FILES.items():
+        content = blob(repository, commit, f"deploy/{origin}")
+        if target == "etc/lurewall/engine.toml":
+            config = tomllib.loads(content.decode())
+            if config.get("dry_run") is not True or config["enforcement"]["adapter"] != "log-only":
+                raise BuildError("the package must ship observe-only enforcement defaults")
+        write_file(root / target, content)
+    write_file(root / ALLOWLIST, "# One IP address or network per line.\n")
+
+
+def stage(
+    repository: Path, commit: str, root: Path, package_version: str, upstream_version: str
+) -> None:
+    copy_application(repository, commit, root)
+    crypto, crypto_license = signing_source(repository, commit)
+    write_file(root / LIBRARY / "crypto.py", crypto)
+    write_file(root / DOC / "copyright", blob(repository, commit, "LICENSE"))
+    write_file(root / DOC / "copyright.eureka", crypto_license)
+    write_file(root / DOC / "source-commit", f"{commit}\n")
+    write_file(
+        root / LIBRARY / f"lurewall-{upstream_version}.dist-info/METADATA",
+        f"Metadata-Version: 2.1\nName: lurewall\nVersion: {upstream_version}\n",
+    )
+    write_file(root / "usr/bin/lurewall", (HERE / "launcher").read_bytes(), executable=True)
+    write_file(
+        root / LIBRARY / "debian-lifecycle", (HERE / "lifecycle").read_bytes(), executable=True
+    )
+    copy_operator_files(repository, commit, root)
+
+    control = root / "DEBIAN"
+    write_file(
+        control / "control",
+        "Package: lurewall\n"
+        f"Version: {package_version}\n"
+        "Section: admin\n"
+        "Priority: optional\n"
+        "Architecture: all\n"
+        "Maintainer: Paul Charydczak <python1@users.noreply.github.com>\n"
+        "Depends: python3 (>= 3.11), python3-cryptography (>= 40), nginx, nftables, logrotate,\n"
+        " adduser, util-linux, init-system-helpers, systemd\n"
+        "Homepage: https://github.com/python1/lurewall\n"
+        "Description: observe-only nginx canaries and signed event log\n"
+        " Created by Paul Charydczak. Installs a systemd observer with optional enforcement.\n",
+    )
+    conffiles = "".join(f"/{path}\n" for path in sorted((*CONFIG_FILES, ALLOWLIST)))
+    write_file(control / "conffiles", conffiles)
+    for name in ("preinst", "postinst", "prerm", "postrm"):
+        write_file(control / name, (HERE / name).read_bytes(), executable=True)
+
+
+def build(repository: Path, requested: str | None, version: str | None, output_dir: Path) -> Path:
+    commit = source_commit(repository, requested)
+    metadata = tomllib.loads(blob(repository, commit, "pyproject.toml").decode())
+    upstream_version = metadata["project"]["version"]
+    package_version = version or f"{upstream_version}~deb1+g{commit[:12]}"
+    if VERSION.fullmatch(upstream_version) is None or VERSION.fullmatch(package_version) is None:
+        raise BuildError("unsupported version for a Debian package filename")
+    epoch = int(git(repository, "show", "-s", "--format=%ct", commit).strip())
+    dpkg_deb = shutil.which("dpkg-deb")
+    if dpkg_deb is None:
+        raise BuildError("dpkg-deb is required. Run the builder on Debian or Ubuntu.")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    package = output_dir / f"lurewall_{package_version}_all.deb"
+    with tempfile.TemporaryDirectory(prefix=".lurewall-", dir=output_dir) as temporary:
+        intermediate = Path(temporary)
+        root = intermediate / "payload"
+        stage(repository, commit, root, package_version, upstream_version)
+        for path in [root, *sorted(root.rglob("*"))]:
+            if path.is_dir():
+                path.chmod(0o755)
+            os.utime(path, (epoch, epoch))
+        assembled = intermediate / package.name
+        subprocess.run(  # noqa: S603 - resolved dpkg-deb with fixed options
+            [
+                dpkg_deb,
+                "--root-owner-group",
+                "--threads-max=1",
+                "-Zxz",
+                "-z6",
+                "--build",
+                str(root),
+                str(assembled),
+            ],
+            env={**os.environ, "SOURCE_DATE_EPOCH": str(epoch), "LC_ALL": "C"},
+            check=True,
+        )
+        os.replace(assembled, package)
+    return package
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--source-dir", type=Path, default=CHECKOUT)
+    parser.add_argument("--source-commit", help="full application commit ID (default: source HEAD)")
+    parser.add_argument("--version", help="override the generated Debian package version")
+    args = parser.parse_args()
+    try:
+        package = build(
+            args.source_dir.resolve(), args.source_commit, args.version, args.output_dir
+        )
+    except (OSError, SyntaxError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        print(f"lurewall Debian build failed ({exc})", file=sys.stderr)
+        return 1
+    print(package)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

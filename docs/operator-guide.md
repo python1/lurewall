@@ -2,8 +2,10 @@
 
 Created by Paul Charydczak.
 
-Use a dedicated nginx vhost on a Debian or Ubuntu host that runs systemd and
-has Python 3.11 or newer. nginx needs the HTTP sub and real-IP modules. The
+Use a dedicated nginx vhost on Debian 13 or Ubuntu 24.04 LTS with systemd.
+The package uses system Python and the distro's cryptography package. It
+requires cryptography 40 or newer, which excludes the stock Debian 12
+package. nginx needs the HTTP sub and real-IP modules. The
 installer adds a service account, a private event log and a separate nginx
 access log. It starts in dry-run, keeps active nginx configuration under your
 control, and gives the detector no firewall capability initially.
@@ -15,22 +17,42 @@ on enforcement. Maintain console access while you qualify firewall settings.
 
 ## Install and connect nginx
 
-Check out the candidate commit you intend to evaluate and initialize its
-pinned signing submodule. Run the installer from that trusted checkout.
+Download the `.deb`, `SHA256SUMS`, `SHA256SUMS.sig`, and
+`lurewall-release.pub` for the same [GitHub release](https://github.com/python1/lurewall/releases).
+Get the expected Ed25519 key fingerprint from the maintainer through a
+trusted channel. Check it before trusting the public key downloaded with the
+package. Use a directory that contains only the release files.
 
 ```sh
-sudo apt install nginx nftables logrotate python3-venv git
-git submodule update --init
-sudo ./deploy/manage install
+sudo apt install openssh-client
+ssh-keygen -lf lurewall-release.pub
+```
+
+Once the fingerprint matches, verify the signed manifest and the package
+checksum before asking APT to install it.
+
+```sh
+awk 'NR == 1 {print "lurewall-release", $1, $2}' lurewall-release.pub > allowed-signers
+ssh-keygen -Y verify -f allowed-signers -I lurewall-release \
+  -n lurewall-release -s SHA256SUMS.sig < SHA256SUMS &&
+  sha256sum --check --strict SHA256SUMS &&
+  sudo apt install "./$(awk 'NR == 1 {print $2}' SHA256SUMS)"
 sudo lurewall status
 ```
 
-The installer builds Python dependencies as the unprivileged
-`lurewall-build` account, separate from the detector and its signing key.
-By default, pip resolves dependencies from its package index. For an offline
-build, pass `--wheelhouse /path/to/wheels` with wheels for the runtime and
-build requirements. Root copies the build into a read-only release and
-activates it after the unprivileged signing check passes.
+The manifest contains the package filename. APT resolves its dependencies
+from the configured distro repositories. The package performs no pip build
+or download on the server.
+
+If you staged the package in an offline image and received an offline-install
+warning, run `sudo dpkg-reconfigure lurewall` on the booted host before
+enabling nftables enforcement.
+
+For a system previously installed from source, detach and reload nginx as
+described under uninstall, then use that checkout's `deploy/manage uninstall`
+before installing the package. Keep the retained signing key and evidence.
+Remove any retained systemd enforcement drop-in and return the retained
+configuration to dry-run before installing from the package.
 
 The installed launcher runs ordinary `sudo lurewall` commands as the
 detector account. The allowlist editor is the privileged exception. It uses
@@ -169,14 +191,12 @@ and remove the installation's reserved `inet lurewall` table if you need to
 clear its blocks immediately. Otherwise existing kernel entries expire on
 their own.
 
-Upgrade with `sudo ./deploy/manage upgrade` from a chosen newer checkout.
-Check the service and `doctor` afterward. Updates keep the operator configs,
-signing key, checkpoints, reader cursor, engine state and signed log. If
-activation fails, the installer restores the previous executable and unit
-definitions without rewinding evidence. It reports the activation error and
-any rollback errors together. A failed release stays on disk when the installer
-cannot confirm that it is safe to remove. Keep off-host copies of your key and
-signed log before upgrading.
+For an upgrade, download and verify the newer release files as above and
+install the verified `.deb` with APT. Keep your operator configuration if
+prompted about a locally edited conffile. The signing key, checkpoints,
+reader cursor, engine state and signed log stay in place. Check the service
+and run `doctor` afterward. Keep off-host copies of your key and signed log
+before upgrading.
 
 Exit status 3 stops automatic restarts after a signed-log integrity failure.
 Preserve the log, published checkpoint and independently retained anchors.
@@ -190,13 +210,15 @@ has the verification and restart steps.
 
 Detach the operator vhost or remove its Lurewall `access_log` directive.
 Remove the format include, run `sudo nginx -t`, and successfully reload
-nginx with `sudo systemctl reload nginx`. Then run `sudo ./deploy/manage
-uninstall`. The uninstaller checks the nginx configuration on disk and
+nginx with `sudo systemctl reload nginx`. Then run `sudo apt remove lurewall`.
+Package removal checks the nginx configuration on disk and
 refuses to proceed if it still references the managed log or format, or if
 the check fails. The reload applies the detached config to running workers.
 Successful uninstall removes the managed software and units, drops the
 reserved nftables table, and immediately lifts active Lurewall blocks.
 Config, site content, key, state, checkpoints and logs remain for recovery or audit.
+Use APT's remove operation to retain package configuration files. A purge can
+delete those files.
 
 On a disposable Debian/Ubuntu VM or a peer's authorized staging server:
 
@@ -214,8 +236,8 @@ On a disposable Debian/Ubuntu VM or a peer's authorized staging server:
    uninstall preserves the evidence. GitHub CI covers disposable integration
    fixtures. This checklist qualifies your host's packages and topology.
 
-Production follow-up includes operating-system package pinning and signed
-release artifacts, longer-running live-host qualification, and
-deployment-specific consent, monitoring, retention and capacity policies. A
+Production follow-up includes an authenticated APT repository, longer-running
+live-host qualification, and deployment-specific consent, monitoring,
+retention and capacity policies. A
 CDN enforcement adapter merits a separate design for limited credentials,
 provider-scoped TTLs, failure handling and independent verification.

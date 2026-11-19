@@ -1,0 +1,344 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: AGPL-3.0-only
+"""The Debian package's state setup and guarded removal."""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import pwd
+import shlex
+import stat
+import subprocess
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+ACCOUNT = "lurewall"
+MAIN = "lurewall.service"
+TIMERS = ("lurewall-sweeper.timer", "lurewall-notify.timer")
+SERVICES = (
+    MAIN,
+    "lurewall-sweeper.service",
+    "lurewall-notify.service",
+    "lurewall-notify-failure.service",
+)
+MANAGED_LOG = Path("/var/log/lurewall/access.jsonl")
+DETACH_NGINX = "Detach the Lurewall nginx configuration, run nginx -t, and reload nginx."
+
+
+class LifecycleError(RuntimeError):
+    pass
+
+
+def run(argv):
+    return subprocess.run(  # noqa: S603 - maintainer commands use fixed binaries and arguments
+        argv, capture_output=True, check=False, text=True, stdin=subprocess.DEVNULL, timeout=120
+    )
+
+
+def checked(runner, *argv):
+    result = runner(list(argv))
+    if result.returncode:
+        raise LifecycleError(f"{Path(argv[0]).name} failed with status {result.returncode}")
+    return result
+
+
+def service_account(runner):
+    try:
+        user = pwd.getpwnam(ACCOUNT)
+    except KeyError:
+        checked(
+            runner,
+            "/usr/sbin/adduser",
+            "--system",
+            "--group",
+            "--home",
+            "/var/lib/lurewall",
+            "--no-create-home",
+            "--shell",
+            "/usr/sbin/nologin",
+            ACCOUNT,
+        )
+        user = pwd.getpwnam(ACCOUNT)
+    if user.pw_uid == 0 or user.pw_gid == 0 or user.pw_shell != "/usr/sbin/nologin":
+        raise LifecycleError("refusing to use an incompatible lurewall account")
+    return user.pw_uid, user.pw_gid
+
+
+def ensure_directory(path, mode, uid, gid):
+    try:
+        path.mkdir(mode=mode)
+    except FileExistsError:
+        created = False
+    else:
+        created = True
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        if created:
+            if os.fstat(fd).st_uid != os.geteuid():
+                raise LifecycleError(f"unexpected owner on newly created directory {path}")
+            os.fchmod(fd, mode)
+            os.fchown(fd, uid, gid)
+        info = os.fstat(fd)
+        if (info.st_uid, info.st_gid) != (uid, gid) or stat.S_IMODE(info.st_mode) != mode:
+            raise LifecycleError(f"unexpected ownership or mode at {path}")
+    finally:
+        os.close(fd)
+
+
+def present(path):
+    return path.exists() or path.is_symlink()
+
+
+def ensure_regular(path):
+    if present(path) and (path.is_symlink() or not path.is_file()):
+        raise LifecycleError(f"expected a regular file at {path}")
+
+
+def enforcing_config(path):
+    ensure_regular(path)
+    with path.open("rb") as stream:
+        config = tomllib.load(stream)
+    enforcement = config.get("enforcement", {})
+    if not isinstance(enforcement, dict) or type(config.get("dry_run", True)) is not bool:
+        raise LifecycleError("invalid enforcement settings in engine.toml")
+    return config.get("dry_run") is False and enforcement.get("adapter") == "nftables"
+
+
+class Lifecycle:
+    def __init__(self, root=Path("/"), runner=run, get_account=service_account):
+        self.root = root
+        self.runner = runner
+        self.get_account = get_account
+        self.state = root / "var/lib/lurewall"
+        self.config = root / "etc/lurewall"
+        self.checkpoint = root / "srv/lurewall/checkpoint"
+        self.access = root / MANAGED_LOG.relative_to("/")
+        self.marker = root / "var/lib/lurewall-package/install"
+        self.live = (root / "run/systemd/system").is_dir()
+
+    def call(self, *argv):
+        return checked(self.runner, *argv)
+
+    def installed(self):
+        if present(self.marker.parent):
+            info = self.marker.parent.lstat()
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != self.root.stat().st_uid
+                or stat.S_IMODE(info.st_mode) != 0o700
+            ):
+                raise LifecycleError("unexpected ownership or mode on package metadata directory")
+        ensure_regular(self.marker)
+        if not self.marker.exists():
+            return None
+        info = self.marker.stat()
+        if info.st_uid != self.root.stat().st_uid or stat.S_IMODE(info.st_mode) != 0o600:
+            raise LifecycleError("unexpected ownership or mode on package install marker")
+        result = self.marker.read_text(encoding="ascii")
+        if result not in ("live\n", "offline\n"):
+            raise LifecycleError("invalid package install marker")
+        return result.strip()
+
+    def save_install(self, reservation):
+        with tempfile.NamedTemporaryFile(dir=self.marker.parent, mode="w", delete=False) as tmp:
+            path = Path(tmp.name)
+            try:
+                tmp.write(reservation + "\n")
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                os.replace(path, self.marker)
+            finally:
+                path.unlink(missing_ok=True)
+
+    def table_exists(self):
+        result = self.runner(["/usr/sbin/nft", "-j", "list", "tables"])
+        if result.returncode and not self.live:
+            return None
+        try:
+            tables = json.loads(result.stdout)["nftables"] if not result.returncode else None
+            if not isinstance(tables, list):
+                raise ValueError
+            found = False
+            for item in tables:
+                if not isinstance(item, dict):
+                    raise ValueError
+                if "table" not in item:
+                    continue
+                table = item["table"]
+                if not isinstance(table, dict) or not {"family", "name"} <= table.keys():
+                    raise ValueError
+                if table["family"] == "inet" and table["name"] == "lurewall":
+                    found = True
+        except (KeyError, TypeError, ValueError):
+            raise LifecycleError("could not inspect nftables tables") from None
+        return found
+
+    def create_state(self):
+        uid, gid = self.get_account(self.runner)
+        root_info = self.root.stat()
+        self.checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        for path, mode in (
+            (self.state, 0o750),
+            (self.state / "keys", 0o700),
+            (self.state / "sweeper", 0o750),
+            (self.state / "operator", 0o700),
+            (self.state / "telemetry", 0o750),
+            (self.checkpoint, 0o750),
+        ):
+            ensure_directory(path, mode, uid, gid)
+        ensure_directory(self.access.parent, 0o751, root_info.st_uid, gid)
+        ensure_regular(self.access)
+        if not self.access.exists():
+            fd = os.open(self.access, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640)
+            with os.fdopen(fd, "wb") as stream:
+                os.fchmod(stream.fileno(), 0o640)
+                os.fchown(stream.fileno(), root_info.st_uid, gid)
+        info = self.access.stat()
+        owners = {root_info.st_uid}
+        with contextlib.suppress(KeyError):
+            # nginx may transfer ownership to its worker on reopen.
+            owners.add(pwd.getpwnam("www-data").pw_uid)
+        if info.st_uid not in owners or (info.st_gid, stat.S_IMODE(info.st_mode)) != (gid, 0o640):
+            raise LifecycleError("nginx access log must be mode 0640 and group lurewall")
+
+        key = self.state / "keys/lurewall.key"
+        canary_state = self.state / "canaries.json"
+        ensure_regular(key)
+        ensure_regular(canary_state)
+        account = ("/usr/sbin/runuser", "-u", ACCOUNT, "--")
+        if not key.exists():
+            artifacts = (
+                self.state / "events.log",
+                self.state / "sweeper/events.log",
+                self.checkpoint / "checkpoint.json",
+            )
+            if any(present(path) for path in artifacts):
+                raise LifecycleError("existing signed evidence has no key. Restore the signing key")
+            self.call(*account, "/usr/bin/lurewall", "keygen", "--key", str(key))
+        self.call(*account, "/usr/bin/lurewall", "pubkey", "--key", str(key))
+
+        if not canary_state.exists():
+            code = (
+                "import sys; sys.path.insert(0, '/usr/lib/lurewall'); "
+                "from lurewall import canaries, labsite; "
+                "canaries.save_state(canaries.generate(labsite.site_routes()), sys.argv[1])"
+            )
+            self.call(*account, "/usr/bin/python3", "-I", "-c", code, str(canary_state))
+
+    def configure(self):
+        info = self.root.stat()
+        ensure_directory(self.marker.parent, 0o700, info.st_uid, info.st_gid)
+        installed = self.installed()
+        if installed is None and enforcing_config(self.config / "engine.toml"):
+            raise LifecycleError("retained configuration enforces. Set dry_run=true before install")
+        if installed != "live":
+            table = self.table_exists()
+            if table:
+                raise LifecycleError(
+                    "cannot reserve the inet lurewall table because it already exists"
+                )
+            reservation = "offline" if table is None else "live"
+        else:
+            reservation = installed
+
+        self.create_state()
+        if installed is None:
+            self.call("/usr/bin/deb-systemd-helper", "enable", MAIN)
+        else:
+            self.call("/usr/bin/deb-systemd-helper", "update-state", MAIN)
+        self.call("/usr/bin/deb-systemd-helper", "update-state", *TIMERS)
+        if self.live:
+            self.call("/usr/bin/systemctl", "--system", "daemon-reload")
+            action = "start" if installed is None else "restart"
+            self.call("/usr/bin/deb-systemd-invoke", action, MAIN)
+        self.save_install(reservation)
+        if reservation == "offline":
+            print(
+                "lurewall: offline install. Run dpkg-reconfigure lurewall on the running host "
+                "before enabling nftables.",
+                file=sys.stderr,
+            )
+
+    def require_nginx_detached(self):
+        # nginx may dump sensitive configuration. Capture it without echoing it.
+        try:
+            result = self.runner(["/usr/sbin/nginx", "-T"])
+            dump = result.stdout or ""
+            if result.returncode or not any(
+                line.startswith("# configuration file ") for line in dump.splitlines()
+            ):
+                raise ValueError
+            tokens = shlex.shlex(dump, posix=True, punctuation_chars=";{}")
+            tokens.whitespace_split = True
+            real_access = self.access.resolve()
+            expect_path = False
+            for word in tokens:
+                if word == "lurewall_operator" or (
+                    expect_path
+                    and word.startswith("/")
+                    and (self.root / word.lstrip("/")).resolve() == real_access
+                ):
+                    raise LifecycleError(f"nginx still references Lurewall. {DETACH_NGINX}")
+                expect_path = word == "access_log"
+        except (OSError, subprocess.SubprocessError, ValueError):
+            raise LifecycleError(f"Could not verify nginx is detached. {DETACH_NGINX}") from None
+
+    def active(self, unit):
+        status = self.runner(["/usr/bin/systemctl", "--system", "is-active", "--quiet", unit])
+        if status.returncode not in (0, 3, 4):
+            raise LifecycleError(f"could not determine whether {unit} is running")
+        return status.returncode == 0
+
+    def remove(self):
+        self.require_nginx_detached()
+        installed = self.installed()
+        table = self.table_exists()
+        if table and installed != "live":
+            raise LifecycleError("the inet lurewall table is not reserved by this package")
+        if table is None and installed == "live":
+            raise LifecycleError("cannot verify the reserved nftables table is empty")
+
+        units = (*TIMERS, *SERVICES)
+        active = [unit for unit in units if self.active(unit)] if self.live else []
+        try:
+            if self.live:
+                self.call("/usr/bin/deb-systemd-invoke", "stop", *units)
+                if any(self.active(unit) for unit in units):
+                    raise LifecycleError("package units remain active. Stop them before retrying")
+            if table:
+                self.call("/usr/sbin/nft", "delete", "table", "inet", "lurewall")
+            self.call("/usr/bin/deb-systemd-helper", "disable", MAIN, *TIMERS)
+        except (LifecycleError, OSError, subprocess.SubprocessError):
+            if active:
+                with contextlib.suppress(LifecycleError, OSError, subprocess.SubprocessError):
+                    self.call("/usr/bin/deb-systemd-invoke", "start", *active)
+            raise
+        self.marker.unlink(missing_ok=True)
+        if table:
+            print("lurewall: active blocks were lifted.")
+        print("lurewall: retained config, signing key, logs, and state.")
+
+
+def main():
+    args = sys.argv[1:]
+    if args not in (["configure"], ["remove"]) or os.geteuid() != 0:
+        print("lurewall: invoke this helper through dpkg", file=sys.stderr)
+        return 1
+    lifecycle = Lifecycle()
+    try:
+        if args[0] == "configure":
+            lifecycle.configure()
+        else:
+            lifecycle.remove()
+    except (LifecycleError, OSError, KeyError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"lurewall package: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

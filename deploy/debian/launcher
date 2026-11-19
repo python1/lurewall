@@ -1,0 +1,21 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+set -eu
+
+invoke='import os, sys
+sys.path.insert(0, "/usr/lib/lurewall")
+os.environ["LUREWALL_EUREKA_CRYPTO"] = "/usr/lib/lurewall/crypto.py"
+from lurewall.cli import main
+raise SystemExit(main())'
+
+if [ "$(/usr/bin/id -u)" = 0 ]; then
+    case "${1-}/${2-}" in
+        allowlist/list|allowlist/add|allowlist/remove)
+            exec /usr/bin/python3 -I -S -c "$invoke" "$@"
+            ;;
+    esac
+    exec /usr/sbin/runuser -u lurewall -- /usr/bin/env -i \
+        PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        LANG=C.UTF-8 HOME=/var/lib/lurewall /usr/bin/python3 -I -c "$invoke" "$@"
+fi
+exec /usr/bin/python3 -I -c "$invoke" "$@"

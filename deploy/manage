@@ -244,6 +244,8 @@ class Deployment:
         return self.run(["/usr/bin/systemctl", *args], **kwargs)
 
     def check_destination(self, action):
+        if present(self.root / "usr/lib/lurewall/debian-lifecycle"):
+            raise DeploymentError("the Lurewall Debian package is installed. Use APT")
         root_ids = (self.root.stat().st_uid, self.root.stat().st_gid)
         for directory in (self.home, self.releases):
             if present(directory):
