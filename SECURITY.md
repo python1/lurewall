@@ -1,8 +1,9 @@
 # Security policy
 
-Lurewall is in development and is not ready for use. v1 is lab-only: it runs on
-a throwaway site in an isolated container and makes no claim about protecting
-real sites. No version is supported for production use.
+The operator workflow is intended for evaluation on a dedicated nginx canary
+vhost. Initial installs observe only. Before enabling enforcement on a server,
+qualify the deployment against the [operator guide](docs/operator-guide.md).
+The project provides no production support commitment.
 
 ## Reporting a vulnerability
 
@@ -28,8 +29,9 @@ project with no bounty and no guaranteed response time.
 
 ## What Lurewall will never do
 
-Lurewall is defensive only. It never sends traffic to a visitor, never scans
-back, never serves a payload and never tries to trace or identify anyone. A
+Lurewall is defensive only. It never scans visitors back, serves an executable
+payload or tries to identify anyone. An optional notifier contacts only the
+operator-configured webhook and sends fixed event types. A
 canary's only effect is one logged request that returns a fixed decoy body
 holding no data. A change that breaks any of these is a security bug.
 

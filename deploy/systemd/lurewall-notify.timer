@@ -1,0 +1,11 @@
+[Unit]
+Description=Send queued Lurewall webhook alerts
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=1min
+AccuracySec=10s
+Unit=lurewall-notify.service
+
+[Install]
+WantedBy=timers.target

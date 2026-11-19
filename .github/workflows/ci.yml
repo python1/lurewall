@@ -24,8 +24,8 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install "ruff==0.17.5"
-      - run: ruff check .
-      - run: ruff format --check .
+      - run: ruff check . deploy/manage
+      - run: ruff format --check . deploy/manage
 
   test:
     runs-on: ubuntu-24.04
@@ -132,6 +132,69 @@ jobs:
         run: |
           /opt/venv/bin/python -m pytest -v -p no:cacheprovider \
             tests/test_nft.py tests/test_nginx_integration.py tests/test_lab_e2e.py
+
+  operator-install:
+    # A disposable runner. nginx serves only a loopback test vhost and
+    # Lurewall stays in observation mode throughout.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+      - name: Install operator prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nginx nftables logrotate python3-venv
+      - name: Install, observe, upgrade, and uninstall
+        run: |
+          set -euo pipefail
+          sudo ./deploy/manage install
+          sudo systemctl is-active --quiet lurewall.service
+          sudo install -d -m 0755 -o lurewall -g lurewall /srv/lurewall/site
+          sudo -u lurewall /usr/local/sbin/lurewall lab-site build \
+            --state /var/lib/lurewall/canaries.json --out /srv/lurewall/site \
+            --server-name lurewall.example --listen 127.0.0.1:18119
+          sudo ln -s /etc/lurewall/nginx/operator-format.conf /etc/nginx/conf.d/lurewall-ci.conf
+          sudo install -m 0600 /srv/lurewall/site/nginx/lurewall-site.conf \
+            /etc/nginx/sites-enabled/lurewall-ci
+          sudo nginx -t
+          sudo systemctl start nginx
+          sudo systemctl reload nginx
+
+          curl --fail --silent --show-error --noproxy '*' --retry 5 --retry-connrefused \
+            --resolve lurewall.example:18119:127.0.0.1 http://lurewall.example:18119/ >/dev/null
+          for attempt in {1..25}; do
+            if sudo grep -Eq '^lurewall_records_processed_total [1-9][0-9]*$' \
+              /var/lib/lurewall/telemetry/lurewall.prom; then
+              break
+            fi
+            sleep 1
+          done
+          sudo grep -Eq '^lurewall_records_processed_total [1-9][0-9]*$' \
+            /var/lib/lurewall/telemetry/lurewall.prom
+          sudo /usr/local/sbin/lurewall doctor
+          sudo nft -j list tables | python3 -c \
+            'import json,sys; assert all(x.get("table",{}).get("name") != "lurewall" for x in json.load(sys.stdin)["nftables"])'
+
+          public_key=$(sudo /usr/local/sbin/lurewall pubkey --key /var/lib/lurewall/keys/lurewall.key)
+          log_inode=$(sudo stat -c %i /var/lib/lurewall/events.log)
+          sudo ./deploy/manage upgrade
+          sudo systemctl is-active --quiet lurewall.service
+          test "$public_key" = "$(sudo /usr/local/sbin/lurewall pubkey --key /var/lib/lurewall/keys/lurewall.key)"
+          test "$log_inode" = "$(sudo stat -c %i /var/lib/lurewall/events.log)"
+          sudo /usr/local/sbin/lurewall doctor
+
+          sudo rm /etc/nginx/sites-enabled/lurewall-ci /etc/nginx/conf.d/lurewall-ci.conf
+          sudo nginx -t
+          sudo systemctl reload nginx
+          sudo ./deploy/manage uninstall
+          test ! -e /usr/local/sbin/lurewall
+          sudo test -s /var/lib/lurewall/events.log
+          sudo test -s /var/lib/lurewall/keys/lurewall.key
+      - name: Inspect service diagnostics after a failure
+        if: failure()
+        run: sudo journalctl -u lurewall.service -n 40 --no-pager
 
   secret-scan:
     runs-on: ubuntu-24.04

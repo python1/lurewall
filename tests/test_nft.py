@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import stat
 import time
@@ -124,6 +125,19 @@ def test_ensure_creates_the_table_once_and_is_safe_to_repeat(env):
 
 
 # -- block, unblock, list --------------------------------------------------------------------
+
+
+def test_operator_rules_keep_port_scope_after_reconciliation(env):
+    adapter = env.adapter(tcp_ports=(443, 80))
+    adapter.ensure()
+    expiry = env.now() + HOUR
+    adapter.block(V4, expiry)
+    adapter.reconcile({V4: expiry})
+    assert env.live(adapter) == {V4: expiry}
+    rules = env.drop_rules()
+    assert len(rules) == 2
+    assert all("tcp dport" in rule for rule in rules)
+    assert all(re.search(r"\{\s*80,\s*443\s*\}", rule) for rule in rules)
 
 
 def test_a_block_is_stored_with_its_expiry_twice(env):

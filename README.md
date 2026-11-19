@@ -1,8 +1,10 @@
 # Lurewall
 
-**Status: lab-tested — v1 research release.** It was tested in an isolated lab
-only; it is not meant for production sites. v2's quiet canaries (below) are
-built and unit-tested but not yet lab-tested.
+**Deployment status.** The Debian/Ubuntu operator workflow is available for
+evaluation on a dedicated nginx canary vhost. Start in observation mode and
+qualify the deployment on your host before enabling enforcement. The
+[operator guide](docs/operator-guide.md) covers setup, monitoring and recovery.
+The research results below refer to the isolated lab.
 
 Lurewall plants harmless canaries in a web page's non-rendered content and
 watches the site's access log for clients that act on them. It blocks a source

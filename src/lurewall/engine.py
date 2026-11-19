@@ -333,6 +333,38 @@ class Engine:
         """source -> absolute expiry time, for every block not yet expired."""
         return {source: block.expiry for source, block in self._blocks.items()}
 
+    def reject_unblock(self) -> None:
+        self._sink.append("manual_unblock_rejected", None, {"reason": "invalid_request"})
+
+    def unblock(self, source: str) -> bool:
+        """Forget a block and retry if the backend could not remove its live entry."""
+        source = _checked_source(source)
+        now = self._clock()
+        block = self._blocks.pop(source, None)
+        self._pending.discard(source)
+        had_hit = self._hits.pop(source, None) is not None
+        self._tracker.forget_attack(source)
+        for request_id in self._issued_by.pop(source, ()):
+            self._issued.pop(request_id, None)
+        for key in [key for key in self._served if key[0] == source]:
+            self._served.pop(key)
+        if block is not None or had_hit:
+            # A restart must not restore the released block even if nft is unavailable.
+            self._dirty = True
+            self._save(now, force=True)
+        if self._enforcing:
+            try:
+                self._adapter.unblock(source)
+            except Exception as exc:
+                self._adapter_failed("manual_unblock", source, exc)
+                return False
+        self._sink.append(
+            "manual_unblock",
+            source,
+            {"outcome": "unblocked" if self._enforcing else "cleared_local_state"},
+        )
+        return True
+
     def has_counted_hit(self, source: str, now_ms: int | None = None) -> bool:
         now = self._clock() if now_ms is None else now_ms
         hit = self._hits.get(source)

@@ -112,6 +112,8 @@ class LogReader:
         max_bytes_per_poll: int = DEFAULT_MAX_BYTES_PER_POLL,
         failure_detail_budget: int = DEFAULT_FAILURE_DETAIL_BUDGET,
         failure_window_ms: int = DEFAULT_FAILURE_WINDOW_MS,
+        require_peer_log: bool = False,
+        trusted_proxies: tuple[accesslog.Network, ...] = (),
         lag_bytes_threshold: int = DEFAULT_LAG_BYTES_THRESHOLD,
         lag_ms_threshold: int = DEFAULT_LAG_MS_THRESHOLD,
         report_interval_ms: int = DEFAULT_REPORT_INTERVAL_MS,
@@ -134,6 +136,8 @@ class LogReader:
         self.state_path = Path(state_path)
         self._sink = sink
         self._max_age_ms = max_age_ms
+        self._require_peer_log = require_peer_log
+        self._trusted_proxies = trusted_proxies
         self._max_bytes_per_poll = max_bytes_per_poll
         self._failure_detail_budget = failure_detail_budget
         self._failure_window_ms = failure_window_ms
@@ -582,7 +586,12 @@ class LogReader:
                 self._buf = b""
                 length = len(line)
                 parsed = accesslog.parse_line(
-                    line, self._line_start, now_ms=now, max_age_ms=self._max_age_ms
+                    line,
+                    self._line_start,
+                    now_ms=now,
+                    max_age_ms=self._max_age_ms,
+                    require_peer_log=self._require_peer_log,
+                    trusted_proxies=self._trusted_proxies,
                 )
                 if isinstance(parsed, ParseFailure):
                     self._failure(parsed, now)

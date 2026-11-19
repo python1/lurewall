@@ -58,6 +58,7 @@ MARKER_FILE = ".lurewall-lab-site"
 
 _DEPLOY_ROOT_RE = re.compile(r"/[A-Za-z0-9._/-]{1,200}", re.ASCII)
 _LISTEN_RE = re.compile(r"[0-9A-Za-z.:\[\]_ -]{1,80}", re.ASCII)
+_HOST_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", re.ASCII | re.IGNORECASE)
 _ROUTE_RE = re.compile(r"/[A-Za-z0-9._/-]{0,200}", re.ASCII)
 
 
@@ -405,6 +406,8 @@ def nginx_config(
     deploy_root: str,
     listen: str = "80",
     checkpoint_file: str | None = None,
+    *,
+    server_name: str | None = None,
 ) -> str:
     """The ``server`` block for the lab site. Meant for nginx's ``http`` context.
 
@@ -417,6 +420,13 @@ def nginx_config(
         raise BuildError("deploy root must be an absolute path of letters, digits and . _ / -")
     if _LISTEN_RE.fullmatch(listen) is None:
         raise BuildError("listen value is not in the allowed form")
+    if server_name is not None and (
+        len(server_name) > 253
+        or "." not in server_name
+        or not all(_HOST_LABEL_RE.fullmatch(label) for label in server_name.split("."))
+        or " " in listen
+    ):
+        raise BuildError("operator vhost requires an exact DNS name and a listen address or port")
     if checkpoint_file is not None and (
         _DEPLOY_ROOT_RE.fullmatch(checkpoint_file) is None or ".." in checkpoint_file
     ):
@@ -447,7 +457,12 @@ def nginx_config(
         "# keep it out of any repository.",
         "server {",
         f"    listen {listen};",
-        "    server_name _;",
+        f"    server_name {server_name or '_'};",
+        *(
+            ["    access_log /var/log/lurewall/access.jsonl lurewall_operator;"]
+            if server_name is not None
+            else []
+        ),
         f"    root {root}/www;",
         "    index index.html;",
         "    charset utf-8;",
@@ -540,6 +555,7 @@ def build(
     extra_pages: Mapping[str, str] | None = None,
     checkpoint_file: str | None = None,
     now_ms: int | None = None,
+    server_name: str | None = None,
 ) -> BuildResult:
     """Build the site and its nginx config into ``out_dir``.
 
@@ -555,6 +571,8 @@ def build(
             raise BuildError(f"extra page route is not in the allowed form: {route!r}")
     routes = site_routes(extra_pages)
     canary_mod.check_collisions(canary_set, routes)
+    root = str(out.resolve()) if deploy_root is None else deploy_root
+    config = nginx_config(canary_set, root, listen, checkpoint_file, server_name=server_name)
 
     canary_mod.refuse_git_work_tree(out, "site output directory")
     if out.exists():
@@ -578,7 +596,6 @@ def build(
     for index, canary in enumerate(_served_decoys(canary_set)):
         _write(out / "decoys" / f"{index}.body", canary.body)
 
-    root = str(out.resolve()) if deploy_root is None else deploy_root
     conf = out / "nginx" / "lurewall-site.conf"
-    _write(conf, nginx_config(canary_set, root, listen, checkpoint_file))
+    _write(conf, config)
     return BuildResult(out_dir=out, web_root=web_root, nginx_conf=conf, routes=routes)

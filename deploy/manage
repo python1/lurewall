@@ -1,0 +1,489 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: AGPL-3.0-only
+"""Install or replace Lurewall from a checked-out, trusted source tree."""
+
+import argparse
+import contextlib
+import fcntl
+import json
+import os
+import pwd
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+SOURCE = Path(__file__).resolve().parents[1]
+ACCOUNT = "lurewall"
+MAIN = "lurewall.service"
+TIMERS = ("lurewall-sweeper.timer", "lurewall-notify.timer")
+SERVICES = (
+    "lurewall-sweeper.service",
+    "lurewall-notify.service",
+    "lurewall-notify-failure.service",
+)
+PINNED_CRYPTO = Path("third_party/eureka_protocol/src/eureka_daemon/crypto.py")
+MANAGED = "lurewall-operator-v1\n"
+
+
+class DeploymentError(RuntimeError):
+    pass
+
+
+def atomic_write(path, data, mode=0o644):
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as temp:
+        staging = Path(temp.name)
+        try:
+            temp.write(data)
+            temp.flush()
+            os.fsync(temp.fileno())
+            staging.chmod(mode)
+            os.replace(staging, path)
+        finally:
+            staging.unlink(missing_ok=True)
+
+
+def present(path):
+    return path.exists() or path.is_symlink()
+
+
+def ensure_regular(path):
+    if present(path) and (path.is_symlink() or not path.is_file()):
+        raise DeploymentError(f"expected a regular file at {path}")
+
+
+def own_directory(path, mode, uid, gid):
+    if not present(path):
+        path.mkdir(mode=mode, parents=True)
+        path.chmod(mode)
+        os.chown(path, uid, gid)
+    info = path.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or (info.st_uid, info.st_gid) != (uid, gid)
+        or stat.S_IMODE(info.st_mode) != mode
+    ):
+        raise DeploymentError(f"unexpected ownership or mode at {path}")
+
+
+def command(argv, *, check=True, capture=False):
+    return subprocess.run(argv, check=check, capture_output=capture, text=True)  # noqa: S603
+
+
+def account():
+    try:
+        user = pwd.getpwnam(ACCOUNT)
+    except KeyError:
+        command(
+            [
+                "/usr/sbin/useradd",
+                "--system",
+                "--user-group",
+                "--no-create-home",
+                "--home-dir",
+                "/var/lib/lurewall",
+                "--shell",
+                "/usr/sbin/nologin",
+                ACCOUNT,
+            ]
+        )
+        user = pwd.getpwnam(ACCOUNT)
+    if user.pw_uid == 0 or user.pw_gid == 0 or user.pw_shell != "/usr/sbin/nologin":
+        raise DeploymentError(f"refusing to use an incompatible {ACCOUNT} account")
+    return user.pw_uid, user.pw_gid
+
+
+class Deployment:
+    def __init__(self, source, *, root=Path("/"), run=command, get_account=account):
+        self.source = source
+        self.root = root
+        self.run = run
+        self.get_account = get_account
+        self.home = root / "opt/lurewall"
+        self.marker = self.home / ".operator-managed"
+        self.releases = self.home / "releases"
+        self.current = self.home / "current"
+        self.launcher = root / "usr/local/sbin/lurewall"
+        self.systemd = root / "etc/systemd/system"
+        self.rotation = root / "etc/logrotate.d/lurewall"
+        self.config = root / "etc/lurewall"
+        self.state = root / "var/lib/lurewall"
+        self.checkpoint = root / "srv/lurewall/checkpoint"
+        self.access = root / "var/log/lurewall/access.jsonl"
+        self.units = {
+            MAIN: source / "deploy/operator" / MAIN,
+            SERVICES[0]: source / "deploy/operator" / SERVICES[0],
+            TIMERS[0]: source / "deploy/systemd" / TIMERS[0],
+            **{unit: source / "deploy/systemd" / unit for unit in (*SERVICES[1:], TIMERS[1])},
+        }
+
+    def systemctl(self, *args, **kwargs):
+        return self.run(["/usr/bin/systemctl", *args], **kwargs)
+
+    def check_destination(self, action):
+        root_ids = (self.root.stat().st_uid, self.root.stat().st_gid)
+        for directory in (self.home, self.releases):
+            if present(directory):
+                own_directory(directory, 0o755, *root_ids)
+        managed = present(self.marker)
+        if managed:
+            ensure_regular(self.marker)
+            if self.marker.read_text(encoding="ascii") != MANAGED:
+                raise DeploymentError("unrecognized Lurewall installation marker")
+        owned_paths = (self.launcher, self.rotation, *(self.systemd / u for u in self.units))
+        if not managed and (
+            present(self.home)
+            or any(present(path) for path in owned_paths)
+            or any(present(self.systemd / f"{unit}.d") for unit in self.units)
+        ):
+            raise DeploymentError("an unmanaged installation exists. Refusing to replace it")
+        if action != "install" and not managed:
+            raise DeploymentError("Lurewall has no managed installation here")
+        if action == "install" and present(self.current):
+            raise DeploymentError("already installed. Use upgrade")
+        if action == "upgrade" and not self.current.is_symlink():
+            raise DeploymentError("active release missing. Use install")
+        if present(self.current) and (
+            not self.current.is_symlink()
+            or not self.current.readlink().is_absolute()
+            or self.current.readlink().parent != self.releases
+            or self.current.resolve().parent != self.releases
+        ):
+            raise DeploymentError("current release link is outside the release directory")
+        if present(self.launcher) and (
+            not self.launcher.is_symlink()
+            or self.launcher.readlink() != self.current / "bin/lurewall"
+        ):
+            raise DeploymentError("refusing to replace an unmanaged launcher")
+        for path in (self.rotation, *(self.systemd / u for u in self.units)):
+            ensure_regular(path)
+
+    def build(self, wheelhouse):
+        release = Path(tempfile.mkdtemp(dir=self.releases, prefix="release-"))
+        release.chmod(0o755)
+        try:
+            project = release / "project"
+            shutil.copytree(
+                self.source / "src", project / "src", ignore=shutil.ignore_patterns("__pycache__")
+            )
+            for filename in ("pyproject.toml", "README.md", "LICENSE"):
+                shutil.copyfile(self.source / filename, project / filename)
+            shutil.copyfile(self.source / PINNED_CRYPTO, release / "crypto.py")
+            self.run([sys.executable, "-m", "venv", str(release / "venv")])
+            python = release / "venv/bin/python"
+            strategy = ["--no-index", "--find-links", str(wheelhouse)] if wheelhouse else []
+            self.run(
+                [
+                    str(python),
+                    "-I",
+                    "-m",
+                    "pip",
+                    "--isolated",
+                    "--disable-pip-version-check",
+                    "install",
+                    "--no-input",
+                    *strategy,
+                    str(project),
+                ]
+            )
+            self.run(
+                [
+                    str(python),
+                    "-I",
+                    "-c",
+                    "import os, sys; os.environ['LUREWALL_EUREKA_CRYPTO'] = sys.argv[1]; "
+                    "import lurewall.signing",
+                    str(release / "crypto.py"),
+                ]
+            )
+            bindir = release / "bin"
+            bindir.mkdir()
+            launcher = "#!/bin/sh\n"
+            launcher += f"export LUREWALL_EUREKA_CRYPTO={shlex.quote(str(release / 'crypto.py'))}\n"
+            launcher += f'exec {shlex.quote(str(release / "venv/bin/lurewall"))} "$@"\n'
+            atomic_write(bindir / "lurewall", launcher.encode("utf-8"), mode=0o755)
+        except BaseException:
+            shutil.rmtree(release)
+            raise
+        return release
+
+    def setup(self, release):
+        import tomllib
+
+        uid, gid = self.get_account()
+        root_uid, root_gid = self.root.stat().st_uid, self.root.stat().st_gid
+        for path, mode in (
+            (self.state, 0o750),
+            (self.state / "keys", 0o700),
+            (self.state / "sweeper", 0o750),
+            (self.state / "operator", 0o700),
+            (self.state / "telemetry", 0o750),
+            (self.checkpoint, 0o750),
+        ):
+            own_directory(path, mode, uid, gid)
+        own_directory(self.access.parent, 0o751, root_uid, gid)
+        ensure_regular(self.access)
+        if not self.access.exists():
+            atomic_write(self.access, b"", mode=0o640)
+            os.chown(self.access, root_uid, gid)
+        info = self.access.stat()
+        allowed_owners = {root_uid}
+        # nginx can transfer ownership to its worker on reopen.
+        with contextlib.suppress(KeyError):
+            allowed_owners.add(pwd.getpwnam("www-data").pw_uid)
+        if info.st_uid not in allowed_owners or (info.st_gid, stat.S_IMODE(info.st_mode)) != (
+            gid,
+            0o640,
+        ):
+            raise DeploymentError("nginx access log must be mode 0640 and group lurewall")
+
+        for subdir in ("", "nginx", "systemd"):
+            own_directory(self.config / subdir, 0o755, root_uid, root_gid)
+        for destination, source in (
+            ("engine.toml", "operator/engine.toml"),
+            ("signals.toml", "operator/signals.toml"),
+            ("nginx/operator-format.conf", "nginx/operator-format.conf"),
+            ("systemd/50-enforcement.conf", "operator/50-enforcement.conf"),
+        ):
+            path = self.config / destination
+            ensure_regular(path)
+            if not path.exists():
+                atomic_write(path, (self.source / "deploy" / source).read_bytes())
+        with (self.config / "engine.toml").open("rb") as handle:
+            engine = tomllib.load(handle)
+        enforcement = engine.get("enforcement", {})
+        if (
+            engine.get("dry_run") is False
+            and isinstance(enforcement, dict)
+            and enforcement.get("adapter") == "nftables"
+        ):
+            raise DeploymentError(
+                "retained configuration enforces. Set dry_run=true before install"
+            )
+        allowlist = self.config / "allowlist"
+        ensure_regular(allowlist)
+        if not allowlist.exists():
+            atomic_write(allowlist, b"# One IP address or network per line.\n")
+
+        key = self.state / "keys/lurewall.key"
+        canaries = self.state / "canaries.json"
+        for path in (key, canaries):
+            ensure_regular(path)
+        if not key.exists():
+            artifacts = (
+                self.state / "events.log",
+                self.state / "sweeper/events.log",
+                self.checkpoint / "checkpoint.json",
+            )
+            if any(present(path) for path in artifacts):
+                raise DeploymentError(
+                    "existing signed evidence has no key. Restore the signing key"
+                )
+            self.run(
+                [
+                    "/usr/sbin/runuser",
+                    "-u",
+                    ACCOUNT,
+                    "--",
+                    str(release / "bin/lurewall"),
+                    "keygen",
+                    "--key",
+                    str(key),
+                ],
+                capture=True,
+            )
+        if not canaries.exists():
+            script = (
+                "import sys; from lurewall import canaries, labsite; "
+                "canaries.save_state(canaries.generate(labsite.site_routes()), sys.argv[1])"
+            )
+            self.run(
+                [
+                    "/usr/sbin/runuser",
+                    "-u",
+                    ACCOUNT,
+                    "--",
+                    "/usr/bin/env",
+                    f"LUREWALL_EUREKA_CRYPTO={release / 'crypto.py'}",
+                    str(release / "venv/bin/python"),
+                    "-I",
+                    "-c",
+                    script,
+                    str(canaries),
+                ]
+            )
+
+    def switch(self, release):
+        temporary = self.home / ".current-tmp"
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+        if release is None:
+            self.current.unlink(missing_ok=True)
+        else:
+            temporary.symlink_to(release)
+            os.replace(temporary, self.current)
+
+    def deploy(self, action, wheelhouse=None):
+        self.check_destination(action)
+        if not (self.source / PINNED_CRYPTO).is_file():
+            raise DeploymentError("initialize the pinned signing submodule before installing")
+        unit_files = {
+            self.systemd / name: source.read_bytes() for name, source in self.units.items()
+        }
+        unit_files[self.rotation] = (
+            self.source / "deploy/operator/lurewall.logrotate"
+        ).read_bytes()
+        current = self.current.readlink() if self.current.is_symlink() else None
+        active = bool(
+            current and self.systemctl("is-active", "--quiet", MAIN, check=False).returncode == 0
+        )
+        if action == "install" and self.has_firewall():
+            raise DeploymentError("the reserved Lurewall nftables table already exists")
+        root_ids = (self.root.stat().st_uid, self.root.stat().st_gid)
+        own_directory(self.home, 0o755, *root_ids)
+        own_directory(self.releases, 0o755, *root_ids)
+        if not self.marker.exists():
+            atomic_write(self.marker, MANAGED.encode("ascii"))
+        release = self.build(wheelhouse)
+        snapshot = {path: path.read_bytes() if path.exists() else None for path in unit_files}
+        had_launcher = self.launcher.is_symlink()
+        attempted_start = False
+        try:
+            if action == "install":
+                self.setup(release)
+            self.switch(release)
+            if not had_launcher:
+                self.launcher.parent.mkdir(parents=True, exist_ok=True)
+                self.launcher.symlink_to(self.current / "bin/lurewall")
+            for path, data in unit_files.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write(path, data)
+            self.systemctl("daemon-reload")
+            if action == "install":
+                attempted_start = True
+                self.systemctl("enable", "--now", MAIN)
+            elif active:
+                attempted_start = True
+                self.systemctl("restart", MAIN)
+        except (OSError, DeploymentError, subprocess.SubprocessError) as exc:
+            # Restore executable and unit definitions. Never rewind state or evidence.
+            integrity_stop = False
+            if attempted_start:
+                status = self.systemctl(
+                    "show", "-p", "ExecMainStatus", "--value", MAIN, check=False, capture=True
+                )
+                integrity_stop = status.stdout.strip() == "3"
+                stop = ("disable", "--now", MAIN) if action == "install" else ("stop", MAIN)
+                self.systemctl(*stop)
+            self.switch(current)
+            for path, previous in snapshot.items():
+                if previous is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    atomic_write(path, previous)
+            if not had_launcher:
+                self.launcher.unlink(missing_ok=True)
+            self.systemctl("daemon-reload")
+            if active and attempted_start and not integrity_stop:
+                self.systemctl("start", MAIN)
+            shutil.rmtree(release)
+            reason = (
+                " Signed-log integrity stop requires operator recovery." if integrity_stop else ""
+            )
+            raise DeploymentError(
+                f"deployment failed. Previous release restored.{reason} {exc}"
+            ) from exc
+
+    def has_firewall(self):
+        output = self.run(["/usr/sbin/nft", "-j", "list", "tables"], capture=True)
+        data = json.loads(output.stdout)
+        tables = data.get("nftables") if isinstance(data, dict) else None
+        if not isinstance(tables, list):
+            raise DeploymentError("nftables did not return a valid table listing")
+        for item in tables:
+            if not isinstance(item, dict):
+                raise DeploymentError("nftables did not return a valid table listing")
+            if "table" in item:
+                table = item["table"]
+                if not isinstance(table, dict) or not {"family", "name"} <= table.keys():
+                    raise DeploymentError("nftables did not return a valid table listing")
+                if table["family"] == "inet" and table["name"] == "lurewall":
+                    return True
+        return False
+
+    def remove_firewall(self):
+        if self.has_firewall():
+            self.run(["/usr/sbin/nft", "delete", "table", "inet", "lurewall"])
+
+    def uninstall(self):
+        self.check_destination("uninstall")
+        enabled_units = [name for name in (MAIN, *TIMERS) if (self.systemd / name).is_file()]
+        if enabled_units:
+            self.systemctl("disable", "--now", *enabled_units)
+        remaining = [name for name in SERVICES if (self.systemd / name).is_file()]
+        if remaining:
+            self.systemctl("stop", *remaining)
+        self.remove_firewall()
+        for unit in self.units:
+            (self.systemd / unit).unlink(missing_ok=True)
+        self.rotation.unlink(missing_ok=True)
+        self.launcher.unlink(missing_ok=True)
+        self.current.unlink(missing_ok=True)
+        self.systemctl("daemon-reload")
+        if self.releases.is_dir() and not self.releases.is_symlink():
+            shutil.rmtree(self.releases)
+        self.marker.unlink()
+        if not any(self.home.iterdir()):
+            self.home.rmdir()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("install", "upgrade", "uninstall"))
+    parser.add_argument(
+        "--wheelhouse", type=Path, help="install Python dependencies from local wheels only"
+    )
+    args = parser.parse_args()
+    if sys.platform != "linux" or os.geteuid() != 0:
+        parser.error("run as root on Debian or Ubuntu with systemd")
+    if sys.version_info < (3, 11):  # noqa: UP036 - called by the system Python
+        parser.error("Lurewall needs Python 3.11 or newer")
+    if args.wheelhouse is not None and not args.wheelhouse.is_dir():
+        parser.error("--wheelhouse must be a directory")
+    requirements = ["/usr/bin/systemctl", "/usr/sbin/nft"]
+    if args.action != "uninstall":
+        requirements += [
+            "/usr/sbin/nginx",
+            "/usr/sbin/logrotate",
+            "/usr/sbin/runuser",
+            "/usr/sbin/useradd",
+        ]
+    missing = [path for path in requirements if not Path(path).is_file()]
+    if missing:
+        parser.error("install the missing prerequisites: " + ", ".join(missing))
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
+        fd = os.open("/run/lock/lurewall-deploy.lock", flags, 0o600)
+        with os.fdopen(fd, "wb") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            deployment = Deployment(SOURCE)
+            if args.action == "uninstall":
+                deployment.uninstall()
+            else:
+                deployment.deploy(args.action, args.wheelhouse and args.wheelhouse.resolve())
+    except (DeploymentError, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        print(f"lurewall deployment: {exc}", file=sys.stderr)
+        return 1
+    if args.action == "uninstall":
+        print("Lurewall removed. Kept config, signing key, logs, and state.")
+    else:
+        print(f"Lurewall {args.action} complete. Inspect with sudo lurewall status.")
+        print("Configure only the intended nginx vhost. See the operator guide.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

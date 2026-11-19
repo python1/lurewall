@@ -84,13 +84,22 @@ class Lab:
             time.sleep(0.05)
         raise AssertionError(f"expected {count} log lines, found {len(self.lines())}")
 
-    def record_for(self, ua: str) -> accesslog.Record:
+    def record_for(self, ua: str, *, operator: bool = False) -> accesslog.Record:
         """The log record of the request that carried this (unique) user agent."""
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
-            for raw in self.lines():
+            if operator:
+                path = self.base / "operator.log"
+                lines = path.read_bytes().splitlines() if path.exists() else []
+            else:
+                lines = self.lines()
+            for raw in lines:
                 parsed = accesslog.parse_line(
-                    raw, 0, now_ms=int(time.time() * 1000), max_age_ms=10**12
+                    raw,
+                    0,
+                    now_ms=int(time.time() * 1000),
+                    max_age_ms=10**12,
+                    require_peer_log=operator,
                 )
                 if isinstance(parsed, accesslog.Record) and parsed.ua == ua:
                     return parsed
@@ -123,6 +132,14 @@ def lab(tmp_path_factory):
     log_conf = log_conf.replace("/var/log/nginx/lurewall.json.log", str(base / "access.log"))
     # The rate limit is not under test here, and these tests are quick on purpose.
     log_conf = log_conf.replace("rate=10r/s", "rate=5000r/s").replace("burst=20", "burst=5000")
+    if "http_realip_module" in version:
+        operator_format = (REPO / "deploy" / "nginx" / "operator-format.conf").read_text()
+        log_conf += (
+            f"\n{operator_format}\n"
+            f"    access_log {base}/operator.log lurewall_operator;\n"
+            "    set_real_ip_from 127.0.0.1;\n"
+            "    real_ip_header X-Forwarded-For;\n"
+        )
     conf = base / "nginx.conf"
     conf.write_text(
         "daemon off;\nmaster_process off;\nworker_processes 1;\n"
@@ -223,6 +240,18 @@ def test_head_sends_the_stamped_header_without_quiet_carriers(lab):
     header = headers[lab.canary_set.header_name.lower()]
     assert refs_in(lab, header) == {"response_header.instruction": record.request_id}
     assert _classifier(lab).classify(record).carries == ()
+
+
+def test_operator_log_retains_the_peer_even_after_nginx_realip_rewrites_it(lab):
+    if not (lab.base / "operator.log").exists():
+        if REQUIRED:
+            pytest.fail("nginx needs the realip module for the operator log format")
+        pytest.skip("nginx lacks the realip module")
+    ua = fresh_ua()
+    status, _, _ = lab.get("/", ua=ua, headers={"X-Forwarded-For": "192.0.2.18"})
+    assert status == 200
+    assert lab.record_for(ua).ip == "192.0.2.18"
+    assert lab.record_for(ua, operator=True).ip == "127.0.0.1"
 
 
 def test_every_placement_is_served_stamped_and_its_decoy_answers(lab):

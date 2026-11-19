@@ -14,11 +14,16 @@ EXIT_OK = 0
 EXIT_FAIL = 1
 EXIT_USAGE = 2
 EXIT_LOG_CORRUPT = 3
+ENGINE_CONFIG = Path("/etc/lurewall/engine.toml")
+SIGNALS_CONFIG = Path("/etc/lurewall/signals.toml")
+ALLOWLIST_FILE = Path("/etc/lurewall/allowlist")
+STATE_DIR = Path("/var/lib/lurewall")
+CHECKPOINT = Path("/srv/lurewall/checkpoint/checkpoint.json")
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="lurewall", description="Lurewall: defensive, lab-only. Not ready for use."
+        prog="lurewall", description="Lurewall: defensive canary detection and signed decisions."
     )
     parser.add_argument("--version", action="version", version=f"lurewall {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -67,6 +72,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="where the output will live on the web server, if not the output directory",
     )
     build.add_argument("--listen", default="80", help="nginx listen value (default: 80)")
+    build.add_argument("--server-name", help="exact hostname for an operator-managed virtual host")
     build.add_argument(
         "--checkpoint-file",
         help="serve this signed checkpoint file at /lurewall-checkpoint.json (absolute path)",
@@ -116,6 +122,12 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--engine", required=True, type=Path, help="the engine config (TOML)")
     run.add_argument("--engine-state", required=True, type=Path, help="the engine's saved state")
     run.add_argument("--checkpoint", type=Path, help="where to write the signed checkpoint file")
+    run.add_argument("--allowlist-file", type=Path, help="additional managed allowlist")
+    run.add_argument("--operator-dir", type=Path, help="service-owned operator request directory")
+    run.add_argument(
+        "--require-peer-log", action="store_true", help="require the operator log format"
+    )
+    run.add_argument("--telemetry-dir", type=Path, help="optional private metrics and alert spool")
     run.add_argument("--once", action="store_true", help="process what is there, then exit")
 
     sweep = commands.add_parser(
@@ -136,11 +148,54 @@ def _build_parser() -> argparse.ArgumentParser:
     status = commands.add_parser(
         "status", help="show active blocks and any standing alert from the engine's saved state"
     )
-    status.add_argument("--state", required=True, type=Path, help=engine_state_help)
+    status.add_argument("--state", type=Path, help=engine_state_help)
+    status.add_argument("--engine", type=Path, help="engine config (default for installed service)")
+    status.add_argument("--json", action="store_true", help="show machine-readable status")
     alerts = commands.add_parser("alerts", help="standing alerts")
     alert_commands = alerts.add_subparsers(dest="alert_command", required=True)
     clear = alert_commands.add_parser("clear", help="clear the standing alert once reviewed")
-    clear.add_argument("--state", required=True, type=Path, help=engine_state_help)
+    clear.add_argument(
+        "--state", type=Path, default=STATE_DIR / "engine.json", help=engine_state_help
+    )
+
+    doctor = commands.add_parser("doctor", help="validate local configuration and runtime inputs")
+    doctor.add_argument("--engine", type=Path, default=ENGINE_CONFIG)
+    doctor.add_argument("--signals", type=Path, default=SIGNALS_CONFIG)
+    doctor.add_argument("--canaries", type=Path, default=STATE_DIR / "canaries.json")
+    doctor.add_argument("--allowlist-file", type=Path, default=ALLOWLIST_FILE)
+    doctor.add_argument("--operator-dir", type=Path, default=STATE_DIR / "operator")
+    doctor.add_argument("--access-log", type=Path, default=Path("/var/log/lurewall/access.jsonl"))
+    doctor.add_argument("--event-log", type=Path, default=STATE_DIR / "events.log")
+    doctor.add_argument("--key", type=Path, default=STATE_DIR / "keys/lurewall.key")
+    doctor.add_argument("--checkpoint", type=Path, default=CHECKPOINT)
+    doctor.add_argument("--require-peer-log", action=argparse.BooleanOptionalAction, default=True)
+    doctor.add_argument("--json", action="store_true", help="show machine-readable checks")
+
+    allow = commands.add_parser("allowlist", help="read or update the installed managed allowlist")
+    allow_commands = allow.add_subparsers(dest="allow_command", required=True)
+    for action in ("list", "add", "remove"):
+        command = allow_commands.add_parser(action)
+        command.add_argument("--file", type=Path, default=ALLOWLIST_FILE)
+        if action != "list":
+            command.add_argument("network", help="one IPv4/IPv6 address or CIDR range")
+
+    unblock = commands.add_parser("unblock", help="queue a manual unblock for the local service")
+    unblock.add_argument("address", help="a single IPv4 or IPv6 address")
+    unblock.add_argument("--operator-dir", type=Path, default=STATE_DIR / "operator")
+
+    explain = commands.add_parser("explain-decision", help="show verified decisions for an address")
+    explain.add_argument("address", help="a single IPv4 or IPv6 address")
+    explain.add_argument("--event-log", type=Path, default=STATE_DIR / "events.log")
+    explain.add_argument(
+        "--pubkey", help="published public key or file (defaults to local signing identity)"
+    )
+    explain.add_argument("--key", type=Path, default=STATE_DIR / "keys/lurewall.key")
+    explain.add_argument("--anchors", type=Path, action="append", default=[])
+    explain.add_argument("--limit", type=int, default=30, help="maximum entries to show")
+
+    notify = commands.add_parser("notify", help="deliver queued local service alerts")
+    notify.add_argument("--telemetry-dir", type=Path, required=True)
+    notify.add_argument("--service-failure", action="store_true")
 
     lab = commands.add_parser("lab", help="the lab test harness (run on test machine A or B)")
     lab_commands = lab.add_subparsers(dest="lab_command", required=True)
@@ -385,6 +440,7 @@ def _canary_command(args: argparse.Namespace) -> int:
                 deploy_root=args.deploy_root,
                 listen=args.listen,
                 checkpoint_file=args.checkpoint_file,
+                **({} if args.server_name is None else {"server_name": args.server_name}),
             )
             counts = canary_set.lure_counts()
             print(f"site built: {result.web_root}")
@@ -441,12 +497,25 @@ def _signals_command(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _notify_ready() -> None:
+    import os
+    import socket
+
+    address = os.environ.get("NOTIFY_SOCKET")
+    if address:
+        if address.startswith("@"):
+            address = "\0" + address[1:]
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as notify:
+            notify.sendto(b"READY=1", address)
+
+
 def _service_command(args: argparse.Namespace) -> int:
     import signal
     import threading
 
     from lurewall import service
     from lurewall.eventlog import LogCorruptError, LogLockedError
+    from lurewall.nft import NftError
     from lurewall.signing import KeyFileError
 
     name = f"lurewall {args.command}"
@@ -467,13 +536,24 @@ def _service_command(args: argparse.Namespace) -> int:
                 engine_config=args.engine,
                 engine_state=args.engine_state,
                 checkpoint=args.checkpoint,
+                allowlist_file=args.allowlist_file,
+                operator_dir=args.operator_dir,
+                require_peer_log=args.require_peer_log,
+                telemetry_dir=args.telemetry_dir,
             )
         )
     except LogCorruptError as exc:
         print(f"{name}: signed log integrity check failed ({exc}).", file=sys.stderr)
         if args.command == "run":
+            if args.telemetry_dir is not None:
+                from lurewall.observability import record_alert
+
+                record_alert(args.telemetry_dir, "integrity_stop")
             print("See the lab runbook for recovery before restarting Lurewall.", file=sys.stderr)
         return EXIT_LOG_CORRUPT
+    except NftError as exc:
+        print(f"{name}: firewall startup failed ({exc})", file=sys.stderr)
+        return EXIT_FAIL
     except (ValueError, OSError, KeyFileError, LogLockedError) as exc:
         # Config, canary and key errors are ValueErrors written by Lurewall.
         print(f"{name}: {exc}", file=sys.stderr)
@@ -483,21 +563,26 @@ def _service_command(args: argparse.Namespace) -> int:
         mode = f"ENFORCING with {running.config.adapter}"
     print(f"lurewall is running ({mode})", flush=True)
     stop = threading.Event()
-    for signum in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(signum, lambda *_: stop.set())
     try:
-        if args.once:
-            while running.step():
-                pass
-        else:
-            running.run(stop)
-    finally:
-        running.close()
+        try:
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                signal.signal(signum, lambda *_: stop.set())
+            if args.once:
+                while running.step():
+                    pass
+            else:
+                _notify_ready()
+                running.run(stop)
+        finally:
+            running.close()
+    except (OSError, NftError) as exc:
+        print(f"{name}: runtime failure ({exc})", file=sys.stderr)
+        return EXIT_FAIL
     return EXIT_OK
 
 
 def _engine_command(args: argparse.Namespace) -> int:
-    from lurewall import engine
+    from lurewall import engine, engineconfig, operator
 
     if args.command == "alerts":
         try:
@@ -507,14 +592,38 @@ def _engine_command(args: argparse.Namespace) -> int:
             return EXIT_USAGE
         print("alert cleared")
         return EXIT_OK
+    installed = args.state is None
+    state_path = args.state or STATE_DIR / "engine.json"
+    unit = operator.unit_state() if installed else None
+    config_path = args.engine or (ENGINE_CONFIG if installed else None)
+    mode = None
+    if config_path is not None:
+        try:
+            config = engineconfig.load(config_path)
+        except engineconfig.EngineConfigError as exc:
+            print(f"lurewall status: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        mode = "dry-run" if config.dry_run else "enforcing" if config.enforcing else "log-only"
     try:
-        status = engine.read_status(args.state)
+        status = engine.read_status(state_path)
     except FileNotFoundError:
-        print("no engine state yet: no blocks, no alert")
-        return EXIT_OK
+        status = None
     except (OSError, ValueError):
         print("lurewall status: the engine state file could not be read", file=sys.stderr)
         return EXIT_USAGE
+    stood_alert = status is not None and status["alert_standing"]
+    exit_code = EXIT_FAIL if (installed and unit != "active") or stood_alert else EXIT_OK
+    if args.json:
+        print(json.dumps({"service": unit, "mode": mode, "saved_state": status}, sort_keys=True))
+        return exit_code
+    if installed:
+        print(f"service: {unit}")
+        print("The block counts below reflect saved intent. Run doctor to check the backend.")
+    if mode is not None:
+        print(f"configured mode: {mode}")
+    if status is None:
+        print("no engine state yet: no blocks, no alert")
+        return exit_code
     if status["alert_standing"]:
         print("WARNING: the block cap was reached and new blocks were refused.")
         print("         Review, then run `lurewall alerts clear`.")
@@ -528,7 +637,72 @@ def _engine_command(args: argparse.Namespace) -> int:
         kind = "enforced" if is_enforced else "dry-run"
         print(f"  {source}\t{kind}\texpires at {expiry} ms")
     # A standing alert is a failing status, so a monitor can watch the exit code.
-    return EXIT_FAIL if status["alert_standing"] else EXIT_OK
+    return exit_code
+
+
+def _operator_command(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from lurewall import operator, signing, verify
+
+    try:
+        if args.command == "doctor":
+            checks = operator.doctor(
+                engine_path=args.engine,
+                signals_path=args.signals,
+                canaries_path=args.canaries,
+                allowlist_path=args.allowlist_file,
+                access_log=args.access_log,
+                event_log=args.event_log,
+                key=args.key,
+                checkpoint=args.checkpoint,
+                operator_dir=args.operator_dir,
+                require_peer_log=args.require_peer_log,
+            )
+            if args.json:
+                print(json.dumps([asdict(check) for check in checks], sort_keys=True))
+            else:
+                for check in checks:
+                    print(f"{check.level.upper()} {check.name}: {check.detail}")
+            return EXIT_FAIL if any(check.level == "fail" for check in checks) else EXIT_OK
+        if args.command == "allowlist":
+            if args.allow_command == "list":
+                for network in operator.read_allowlist(args.file):
+                    print(network)
+            elif operator.change_allowlist(args.file, args.allow_command, args.network):
+                print("Managed allowlist updated. Restart lurewall.service to apply.")
+            else:
+                print("Managed allowlist already matches this request.")
+        elif args.command == "unblock":
+            source = operator.queue_unblock(args.operator_dir, args.address)
+            print(f"Unblock queued for {source}. Check the signed decisions for completion.")
+        else:
+            key = (
+                signing.read_public_key(args.pubkey)
+                if args.pubkey is not None
+                else signing.EurekaSigner.load(args.key).public_key_hex
+            )
+            anchors = args.anchors or (
+                [CHECKPOINT] if args.event_log == STATE_DIR / "events.log" else []
+            )
+            report, source, count, history = operator.explain(
+                args.address, args.event_log, key, anchors, args.limit
+            )
+            if not report.ok:
+                print(verify.format_report(report), file=sys.stderr)
+                return EXIT_FAIL
+            print(f"source {source}: showing {len(history)} of {count} verified decisions")
+            print(
+                f"checkpoint verified through sequence {report.last_matched_anchor_seq}"
+                if report.last_matched_anchor_seq is not None
+                else "chain verified without an independent checkpoint"
+            )
+            for record in history:
+                print(json.dumps(record, sort_keys=True))
+    except (OSError, ValueError, signing.KeyFileError) as exc:
+        print(f"lurewall {args.command}: {ascii(str(exc))[1:-1]}", file=sys.stderr)
+        return EXIT_USAGE
+    return EXIT_OK
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -543,6 +717,12 @@ def main(argv: list[str] | None = None) -> int:
         return _service_command(args)
     if args.command in ("status", "alerts"):
         return _engine_command(args)
+    if args.command in ("doctor", "allowlist", "unblock", "explain-decision"):
+        return _operator_command(args)
+    if args.command == "notify":
+        from lurewall.observability import notify
+
+        return notify(args.telemetry_dir, service_failure=args.service_failure)
     if args.command == "lab":
         return _lab_command(args)
     if args.command == "checkpoint":

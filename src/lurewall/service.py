@@ -26,6 +26,8 @@ from lurewall.engine import Adapter, Engine, LogOnlyAdapter, journal_alert
 from lurewall.eventlog import EventLog
 from lurewall.logreader import LogReader
 from lurewall.nft import NftAdapter, NftError, Runner, system_runner
+from lurewall.observability import Telemetry
+from lurewall.operator import consume_unblock, read_allowlist, validate_control_dir
 from lurewall.signals import Classifier
 
 
@@ -44,6 +46,10 @@ class Paths:
     engine_config: Path
     engine_state: Path
     checkpoint: Path | None = None
+    allowlist_file: Path | None = None
+    operator_dir: Path | None = None
+    require_peer_log: bool = False
+    telemetry_dir: Path | None = None
 
 
 def make_adapter(
@@ -58,6 +64,7 @@ def make_adapter(
             runner if runner is not None else system_runner(config.nft_path),
             clock=clock,
             dry_run=config.dry_run,
+            tcp_ports=config.tcp_ports,
         )
     return LogOnlyAdapter()
 
@@ -75,6 +82,22 @@ class Service:
         # Everything that can be wrong with the files is found before the
         # signed log is opened, so a bad config writes nothing.
         config = engineconfig.load(paths.engine_config)
+        if paths.allowlist_file is not None:
+            config = replace(
+                config,
+                allowlist=tuple(
+                    dict.fromkeys((*config.allowlist, *read_allowlist(paths.allowlist_file)))
+                ),
+            )
+        self._operator_dir = paths.operator_dir
+        self._clock = clock
+        self._next_unblock_ms = 0
+        if self._operator_dir is not None:
+            validate_control_dir(self._operator_dir)
+        if paths.require_peer_log and config.enforcing and not config.tcp_ports:
+            raise engineconfig.EngineConfigError(
+                "operator enforcement requires explicit enforcement.tcp_ports"
+            )
         canary_set = canaries.load_state(paths.canaries)
         routes = labsite.site_routes()
         # A decoy that collides with a real route is disabled, not served as a
@@ -95,34 +118,49 @@ class Service:
         signer = signing.EurekaSigner.load(paths.key)
 
         self.config = config
+        self.telemetry = Telemetry(paths.telemetry_dir) if paths.telemetry_dir is not None else None
         self.events = EventLog(
             paths.event_log, signer, checkpoint_path=paths.checkpoint, fsync=fsync, clock=clock
         )
         try:
-            self.collector = SignalCollector(classifier, self.events)
+            sink = self.telemetry.sink(self.events) if self.telemetry is not None else self.events
+            self.collector = SignalCollector(classifier, sink)
             self.adapter = make_adapter(config, runner=runner, clock=clock)
             self.engine = Engine(
                 config,
-                self.events,
+                sink,
                 self.collector.tracker,
                 adapter=self.adapter,
                 state_path=paths.engine_state,
                 clock=clock,
                 alert=alert,
             )
-            self.reader = LogReader(paths.access_log, paths.reader_state, self.events, clock=clock)
+            self.reader = LogReader(
+                paths.access_log,
+                paths.reader_state,
+                sink,
+                clock=clock,
+                require_peer_log=paths.require_peer_log,
+                trusted_proxies=config.trusted_proxies,
+            )
             self.events.append(
                 "service_started", None, {"dry_run": config.dry_run, "adapter": config.adapter}
             )
             for canary_id in disabled:
                 self.events.append("canary_disabled_collision", None, {"canary": canary_id})
-            self.engine.start()
+            self._process_control()
+            report = self.engine.start()
+            if paths.require_peer_log and config.enforcing and report is None:
+                raise NftError(
+                    "initial nftables reconciliation failed; check the unit and firewall"
+                )
         except BaseException:
             self.events.close()
             raise
 
     def step(self) -> int:
         """Read what is new in the access log and act on it. Returns the record count."""
+        self._process_control()
         records = self.reader.poll()
         for record in records:
             self.engine.handle(self.collector.handle(record))
@@ -131,7 +169,22 @@ class Service:
         self.reader.commit()
         self.engine.tick()
         self.events.tick()
+        if self.telemetry is not None:
+            self.telemetry.publish(
+                records=len(records),
+                active_blocks=len(self.engine.active_blocks()),
+                lag_bytes=self.reader.lag().bytes_behind,
+                enforcing=self.config.enforcing,
+                log_stopped=self.events.stopped,
+            )
         return len(records)
+
+    def _process_control(self) -> None:
+        if self._operator_dir is None:
+            return
+        now = self._clock()
+        if now >= self._next_unblock_ms and not consume_unblock(self._operator_dir, self.engine):
+            self._next_unblock_ms = now + 5_000
 
     def run(self, stop: threading.Event, interval_s: float = 1.0) -> None:
         while not stop.is_set():
@@ -146,7 +199,11 @@ class Service:
             # A clean stop leaves a checkpoint over everything written so far.
             self.events.checkpoint()
         finally:
-            self.events.close()
+            try:
+                self.events.close()
+            finally:
+                if self.telemetry is not None:
+                    self.telemetry.publish(up=False, force=True)
 
 
 def sweep(

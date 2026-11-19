@@ -231,11 +231,19 @@ class NftAdapter:
         *,
         clock: Callable[[], int] = _now_ms,
         dry_run: bool = True,
+        tcp_ports: tuple[int, ...] = (),
     ) -> None:
+        if any(type(port) is not int or not 1 <= port <= 65535 for port in tcp_ports):
+            raise ValueError("nftables TCP ports must be integers from 1 to 65535")
         self._run = runner if runner is not None else system_runner()
         self._clock = clock
         self.dry_run = dry_run
         self._ready = False
+        self._ruleset = RULESET
+        if tcp_ports:
+            ports = ", ".join(str(port) for port in sorted(set(tcp_ports)))
+            scope = f" tcp dport {{ {ports} }} counter drop"
+            self._ruleset = RULESET.replace(" counter drop", scope)
 
     # -- plumbing --------------------------------------------------------------------
 
@@ -247,7 +255,7 @@ class NftAdapter:
         """Create the table, sets, chain and drop rules if they are missing."""
         if self.dry_run or self._ready:
             return
-        self._run(["-f", "-"], RULESET)
+        self._run(["-f", "-"], self._ruleset)
         self._ready = True
 
     def installed(self) -> bool:
@@ -340,7 +348,7 @@ class NftAdapter:
             self._ready = False
         # Refresh the managed chain in the same transaction as element changes.
         # A malformed listing below still prevents any changes to a live table.
-        lines = RULESET.splitlines() if self._ready else []
+        lines = self._ruleset.splitlines() if self._ready else []
         self.ensure()
         in_place = set()
         for entry in self.list():
