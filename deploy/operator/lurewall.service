@@ -1,0 +1,57 @@
+# Installed observer. The enforcement capability is an explicit drop-in.
+[Unit]
+Description=Lurewall nginx observer
+After=nginx.service time-sync.target
+OnFailure=lurewall-notify-failure.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=lurewall
+Group=lurewall
+ExecStart=/opt/lurewall/current/bin/lurewall run \
+    --access-log /var/log/lurewall/access.jsonl \
+    --reader-state /var/lib/lurewall/reader.state \
+    --event-log /var/lib/lurewall/events.log \
+    --key /var/lib/lurewall/keys/lurewall.key \
+    --canaries /var/lib/lurewall/canaries.json \
+    --signals /etc/lurewall/signals.toml \
+    --engine /etc/lurewall/engine.toml \
+    --engine-state /var/lib/lurewall/engine.json \
+    --checkpoint /srv/lurewall/checkpoint/checkpoint.json \
+    --allowlist-file /etc/lurewall/allowlist \
+    --operator-dir /var/lib/lurewall/operator \
+    --telemetry-dir /var/lib/lurewall/telemetry \
+    --require-peer-log
+Restart=on-failure
+RestartPreventExitStatus=2 3
+RestartSec=15s
+TimeoutStartSec=60s
+TimeoutStopSec=30s
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+ReadWritePaths=/var/lib/lurewall /srv/lurewall/checkpoint
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

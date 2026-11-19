@@ -1,0 +1,19 @@
+version = 1
+
+[site]
+# Replace this example with the exact host of the dedicated nginx vhost.
+hosts = ["lurewall.example"]
+https = false
+asset_prefixes = ["/assets/"]
+asset_extensions = ["css", "js", "png", "jpg", "svg", "ico", "woff2"]
+
+[attack_paths]
+segment = [".env", ".git", ".svn"]
+
+[injection]
+families = ["sqli", "traversal", "xss", "jndi", "command", "file"]
+
+[thresholds]
+window_minutes = 15
+distinct_attack_signals = 2
+max_sources = 10000

@@ -1,0 +1,16 @@
+version = 1
+dry_run = true
+
+[enforcement]
+adapter = "log-only"
+tcp_ports = [80, 443]
+
+[block]
+ttl_minutes = 5
+max_ttl_minutes = 30
+cap = 256
+
+[sources]
+allowlist = []
+log_only_ranges = []
+trusted_proxies = []

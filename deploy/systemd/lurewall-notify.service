@@ -1,0 +1,39 @@
+[Unit]
+Description=Lurewall webhook notifier
+After=network.target
+
+[Service]
+Type=oneshot
+User=lurewall
+Group=lurewall
+EnvironmentFile=-/etc/lurewall/alerts.env
+ExecStart=/opt/lurewall/current/bin/lurewall notify --telemetry-dir /var/lib/lurewall/telemetry
+TimeoutStartSec=25s
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+InaccessiblePaths=-/etc/lurewall -/var/log/lurewall -/var/lib/lurewall/keys
+InaccessiblePaths=-/var/lib/lurewall/events.log -/var/lib/lurewall/sweeper.log
+InaccessiblePaths=-/var/lib/lurewall/sweeper -/srv/lurewall/checkpoint
+InaccessiblePaths=-/var/lib/lurewall/canaries.json -/var/lib/lurewall/engine.json
+InaccessiblePaths=-/var/lib/lurewall/reader.state -/var/lib/lurewall/operator
+ReadWritePaths=/var/lib/lurewall/telemetry
+UMask=0077

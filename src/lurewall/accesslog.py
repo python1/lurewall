@@ -20,6 +20,7 @@ import re
 from dataclasses import dataclass
 
 from lurewall.canonical import sha256_hex
+from lurewall.engineconfig import Network
 
 FIELDS = (
     "ts",
@@ -35,6 +36,10 @@ FIELDS = (
     "request_id",
 )
 _FIELD_SET = frozenset(FIELDS)
+OPERATOR_FIELDS = (*FIELDS, "forwarded_for")
+_OPERATOR_FIELD_SET = frozenset(OPERATOR_FIELDS)
+_MAX_FORWARDED_LENGTH = 4096
+_MAX_FORWARDED_HOPS = 32
 
 # nginx can turn one request byte into six log bytes (\u00XX), and several
 # fields can each hold a full header buffer. A longer line is not from nginx.
@@ -50,7 +55,7 @@ class Record:
     """One request, as nginx logged it. String fields are untrusted data."""
 
     ts_ms: int
-    ip: str  # normalized address text; the one field nginx, not the client, decides
+    ip: str  # normalized socket peer, or a client resolved through trusted proxies
     method: str
     request: str
     uri: str
@@ -106,7 +111,36 @@ def _normalize_ip(text: str) -> str | None:
     return address.compressed
 
 
-def parse_line(raw: bytes, offset: int, *, now_ms: int, max_age_ms: int) -> Record | ParseFailure:
+def _forwarded_client(peer: str, chain: str, trusted_proxies: tuple[Network, ...]) -> str:
+    def trusted(address: str) -> bool:
+        ip = ipaddress.ip_address(address)
+        return any(ip in network for network in trusted_proxies)
+
+    if not trusted(peer) or len(chain) > _MAX_FORWARDED_LENGTH:
+        return peer
+    hops = chain.split(",")
+    if len(hops) > _MAX_FORWARDED_HOPS:
+        return peer
+    # The peer is verified independently of the header. Walk back through
+    # trusted hops and stop at the first address they received.
+    for hop in reversed(hops):
+        address = _normalize_ip(hop.strip(" \t"))
+        if address is None:
+            return peer
+        if not trusted(address):
+            return address
+    return peer
+
+
+def parse_line(
+    raw: bytes,
+    offset: int,
+    *,
+    now_ms: int,
+    max_age_ms: int,
+    require_peer_log: bool = False,
+    trusted_proxies: tuple[Network, ...] = (),
+) -> Record | ParseFailure:
     """Turn one log line (no trailing newline) into a Record or a ParseFailure."""
     digest = sha256_hex(raw)
 
@@ -129,8 +163,11 @@ def parse_line(raw: bytes, offset: int, *, now_ms: int, max_age_ms: int) -> Reco
         return failure("not_json")
     if type(obj) is not dict:
         return failure("not_an_object")
-    if obj.keys() != _FIELD_SET:
+    operator_format = obj.keys() == _OPERATOR_FIELD_SET
+    if not operator_format and obj.keys() != _FIELD_SET:
         return failure("unexpected_fields")
+    if not operator_format and (require_peer_log or trusted_proxies):
+        return failure("peer_log_required")
     if any(type(value) is not str for value in obj.values()):
         return failure("field_not_a_string")
 
@@ -141,6 +178,8 @@ def parse_line(raw: bytes, offset: int, *, now_ms: int, max_age_ms: int) -> Reco
     ip = _normalize_ip(obj["ip"])
     if ip is None:
         return failure("bad_ip")
+    if operator_format and trusted_proxies:
+        ip = _forwarded_client(ip, obj["forwarded_for"], trusted_proxies)
     if _STATUS_RE.fullmatch(obj["status"]) is None:
         return failure("bad_status")
     if _REQUEST_ID_RE.fullmatch(obj["request_id"]) is None:

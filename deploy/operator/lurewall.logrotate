@@ -1,0 +1,15 @@
+/var/log/lurewall/access.jsonl {
+    daily
+    maxsize 50M
+    rotate 7
+    missingok
+    notifempty
+    nocompress
+    nodateext
+    create 0640 root lurewall
+    postrotate
+        if systemctl is-active --quiet nginx.service; then
+            systemctl kill --kill-who=main --signal=USR1 nginx.service
+        fi
+    endscript
+}

@@ -17,6 +17,7 @@ reason word and its hash, because log text is attacker-controlled.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -152,8 +153,13 @@ def load_anchors(
 
 
 def verify_log(
-    log_path: str | Path, public_key_hex: str, anchor_paths: list[Path] | None = None
+    log_path: str | Path,
+    public_key_hex: str,
+    anchor_paths: list[Path] | None = None,
+    *,
+    visit: Callable[[entry_mod.Entry], None] | None = None,
 ) -> Report:
+    """Verify the chain, optionally visiting each checked entry before the final verdict."""
     report = Report()
     anchors: dict[int, str] = {}
     if anchor_paths:
@@ -196,6 +202,8 @@ def verify_log(
             report.head_hash = item.hash
             if expected in anchors:
                 anchored_hashes[expected] = item.hash
+            if visit is not None:
+                visit(item)
             offset += len(raw)
 
     for seq in sorted(anchors):

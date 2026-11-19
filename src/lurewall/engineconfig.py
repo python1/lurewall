@@ -16,6 +16,8 @@ from pathlib import Path
 CONFIG_VERSION = 1
 MAX_CONFIG_BYTES = 256 * 1024
 MAX_RANGES = 20_000
+MAX_TRUSTED_PROXIES = 64
+MAX_TCP_PORTS = 64
 
 ADAPTERS = ("log-only", "nftables")
 _NFT_PATH_RE = re.compile(r"(?:/[A-Za-z0-9._-]{1,64}){1,8}", re.ASCII)
@@ -43,6 +45,8 @@ class EngineConfig:
     # What enforces a block once dry-run is off. "log-only" blocks nothing.
     adapter: str = "log-only"
     nft_path: str = "/usr/sbin/nft"
+    tcp_ports: tuple[int, ...] = ()
+    trusted_proxies: tuple[Network, ...] = ()
 
     @property
     def enforcing(self) -> bool:
@@ -72,6 +76,41 @@ class EngineConfig:
             raise EngineConfigError("nft_path must be an absolute path to the nft binary")
         if self.max_ttl_ms < self.ttl_ms:
             raise EngineConfigError("the longest TTL cannot be shorter than the first TTL")
+        if (
+            type(self.tcp_ports) is not tuple
+            or len(self.tcp_ports) > MAX_TCP_PORTS
+            or any(type(port) is not int or not 1 <= port <= 65535 for port in self.tcp_ports)
+            or len(self.tcp_ports) != len(set(self.tcp_ports))
+        ):
+            raise EngineConfigError(
+                f"enforcement.tcp_ports must contain at most {MAX_TCP_PORTS} distinct "
+                "whole-number TCP ports from 1 to 65535"
+            )
+        if (
+            type(self.trusted_proxies) is not tuple
+            or len(self.trusted_proxies) > MAX_TRUSTED_PROXIES
+            or any(
+                not isinstance(network, (ipaddress.IPv4Network, ipaddress.IPv6Network))
+                or network.network_address.is_unspecified
+                or network.network_address.is_multicast
+                or (
+                    isinstance(network.network_address, ipaddress.IPv6Address)
+                    and network.network_address.ipv4_mapped is not None
+                )
+                for network in self.trusted_proxies
+            )
+            or len(self.trusted_proxies) != len(set(self.trusted_proxies))
+        ):
+            raise EngineConfigError(
+                f"sources.trusted_proxies must contain at most {MAX_TRUSTED_PROXIES} "
+                "distinct explicit proxy addresses or CIDR ranges without default, "
+                "unspecified, multicast, or IPv4-mapped ranges"
+            )
+        if self.trusted_proxies and self.enforcing:
+            raise EngineConfigError(
+                "trusted proxies require dry-run or the log-only adapter because local "
+                "nftables cannot block a client behind a terminating proxy"
+            )
 
 
 def _table(parent: dict, name: str, allowed: set[str]) -> dict:
@@ -113,6 +152,8 @@ def parse(raw: bytes | str) -> EngineConfig:
             raw = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise EngineConfigError("engine config is not UTF-8") from exc
+    if len(raw) > MAX_CONFIG_BYTES:
+        raise EngineConfigError("engine config is too large")
     try:
         doc = tomllib.loads(raw)
     except (tomllib.TOMLDecodeError, RecursionError) as exc:
@@ -130,9 +171,12 @@ def parse(raw: bytes | str) -> EngineConfig:
 
     canary = _table(doc, "canary", {"sticky_days", "id_ttl_hours"})
     block = _table(doc, "block", {"ttl_minutes", "max_ttl_minutes", "cap"})
-    sources = _table(doc, "sources", {"allowlist", "log_only_ranges"})
+    sources = _table(doc, "sources", {"allowlist", "log_only_ranges", "trusted_proxies"})
     limits = _table(doc, "limits", {"max_hit_sources", "max_issued_ids", "max_ids_per_source"})
-    enforcement = _table(doc, "enforcement", {"adapter", "nft_path"})
+    enforcement = _table(doc, "enforcement", {"adapter", "nft_path", "tcp_ports"})
+    ports = enforcement.get("tcp_ports", [])
+    if type(ports) is not list:
+        raise EngineConfigError("enforcement.tcp_ports must be a list of TCP ports")
     week = 7 * 24 * 60
     return EngineConfig(
         dry_run=dry_run,
@@ -148,6 +192,10 @@ def parse(raw: bytes | str) -> EngineConfig:
         max_ids_per_source=_integer(limits, "limits", "max_ids_per_source", 256, 1, 100_000),
         adapter=enforcement.get("adapter", "log-only"),
         nft_path=enforcement.get("nft_path", "/usr/sbin/nft"),
+        tcp_ports=tuple(ports),
+        trusted_proxies=parse_networks(
+            sources.get("trusted_proxies", []), "sources.trusted_proxies"
+        ),
     )
 
 
