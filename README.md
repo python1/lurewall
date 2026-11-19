@@ -83,7 +83,9 @@ isolated container. Details, run IDs and substitutions are in
 Lurewall combines a canary hit with attack probes behind one gate, and adds
 expiring blocks and an anchored, signed log.
 
-## v2: quiet canaries (not yet lab-tested)
+## v2: quiet canaries (released in v0.2.0, not yet lab-tested)
+
+Released in v0.2.0 with the Debian/Ubuntu operator package.
 
 v1's lures give orders, and careful agents decline them. v2 adds three
 *destination* canaries beside the v1 set. They name a place and ask nothing.
