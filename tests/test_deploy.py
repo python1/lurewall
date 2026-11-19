@@ -337,6 +337,19 @@ def test_install_refuses_existing_managed_names_and_firewall(deployment):
     assert target.launcher.read_text() == "other local binary"
 
 
+def test_source_install_refuses_an_existing_debian_package(deployment):
+    target, commands = deployment
+    marker = target.root / "usr/lib/lurewall/debian-lifecycle"
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+
+    with pytest.raises(DeploymentError, match="Debian package is installed"):
+        target.deploy("install")
+
+    assert commands.calls == []
+    assert not target.home.exists()
+
+
 def test_reinstall_requires_dry_run_when_retained_configuration_enforces(deployment):
     target, commands = deployment
     target.deploy("install")

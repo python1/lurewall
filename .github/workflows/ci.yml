@@ -24,8 +24,8 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install "ruff==0.17.5"
-      - run: ruff check . deploy/manage
-      - run: ruff format --check . deploy/manage
+      - run: ruff check . deploy/manage deploy/debian/build deploy/debian/lifecycle
+      - run: ruff format --check . deploy/manage deploy/debian/build deploy/debian/lifecycle
 
   test:
     runs-on: ubuntu-24.04
@@ -233,6 +233,85 @@ jobs:
       - name: Inspect service diagnostics after a failure
         if: failure()
         run: sudo journalctl -u lurewall.service -n 40 --no-pager
+
+  deb-build:
+    runs-on: ubuntu-24.04
+    env:
+      LUREWALL_PACKAGE_SOURCE: ${{ github.event.pull_request.base.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: packaging
+      - name: Check out the exact source revision being packaged
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.event.pull_request.base.repo.full_name || github.repository }}
+          ref: ${{ env.LUREWALL_PACKAGE_SOURCE }}
+          persist-credentials: false
+          submodules: true
+          path: packaged-source
+      - name: Build the canonical Debian package
+        run: |
+          set -euo pipefail
+          python3 packaging/deploy/debian/build \
+            --source-dir packaged-source --source-commit "$LUREWALL_PACKAGE_SOURCE" \
+            --output-dir "$RUNNER_TEMP/lurewall-deb"
+          sha256sum "$RUNNER_TEMP/lurewall-deb/"*.deb
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lurewall-deb
+          path: ${{ runner.temp }}/lurewall-deb/*.deb
+          if-no-files-found: error
+
+  deb-install-ubuntu:
+    needs: deb-build
+    runs-on: ubuntu-24.04
+    env:
+      LUREWALL_PACKAGE_SOURCE: ${{ github.event.pull_request.base.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: lurewall-deb
+          path: ${{ runner.temp }}/lurewall-deb
+      - run: sudo apt-get update
+      - name: Test-install and remove the release artifact
+        run: |
+          sudo bash tests/smoke_deb.sh "$RUNNER_TEMP/lurewall-deb" "$LUREWALL_PACKAGE_SOURCE" systemd
+      - name: Inspect service diagnostics after a failure
+        if: failure()
+        run: sudo journalctl -u lurewall.service -n 40 --no-pager
+
+  deb-install-debian:
+    needs: deb-build
+    runs-on: ubuntu-24.04
+    container:
+      # Debian 13 (trixie), pinned multi-arch manifest.
+      image: debian@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6
+      options: --cap-add=NET_ADMIN
+    env:
+      LUREWALL_PACKAGE_SOURCE: ${{ github.event.pull_request.base.sha || github.sha }}
+    steps:
+      - name: Prepare fresh Debian container
+        run: |
+          set -eu
+          printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
+          chmod 0755 /usr/sbin/policy-rc.d
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: lurewall-deb
+          path: ${{ runner.temp }}/lurewall-deb
+      - name: Test-install and remove the same artifact without a systemd PID 1
+        run: |
+          bash tests/smoke_deb.sh "$RUNNER_TEMP/lurewall-deb" "$LUREWALL_PACKAGE_SOURCE" container
 
   secret-scan:
     runs-on: ubuntu-24.04
