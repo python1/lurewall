@@ -25,12 +25,17 @@ sudo ./deploy/manage install
 sudo lurewall status
 ```
 
-The installer builds a root-owned release in its own virtual environment.
-By default, pip resolves build and runtime dependencies from its package
-index. For an offline build, supply a wheelhouse for your Python and platform
-with `--wheelhouse /path/to/wheels`. It must include runtime dependencies
-and the build requirements. The installer verifies the pinned signing code
-before switching the release.
+The installer builds Python dependencies as the unprivileged
+`lurewall-build` account, separate from the detector and its signing key.
+By default, pip resolves dependencies from its package index. For an offline
+build, pass `--wheelhouse /path/to/wheels` with wheels for the runtime and
+build requirements. Root copies the build into a read-only release and
+activates it after the unprivileged signing check passes.
+
+The installed launcher runs ordinary `sudo lurewall` commands as the
+detector account. The allowlist editor is the privileged exception. It uses
+trusted application source and the standard library without loading built
+packages.
 
 Set `VHOST` to the exact dedicated DNS hostname you will use. Set the same
 hostname in `[site].hosts` in `/etc/lurewall/signals.toml`. The generated
@@ -76,9 +81,11 @@ sudo lurewall pubkey --key /var/lib/lurewall/keys/lurewall.key
 
 `doctor` samples the actual access log and validates the installed configs,
 local paths, recent timestamps, nftables visibility and the checkpoint.
-Check permissions both as root and as the service account where practical.
-The unprivileged account in dry-run may be unable to query nftables. When
-enforcement is configured, verify startup under the real systemd drop-in.
+The standalone doctor runs as the service account without the unit's
+firewall capability. If its nftables probe is unavailable, use
+`sudo /usr/sbin/nft -j list tables` for the independent read-only kernel
+check. When enabling enforcement, also verify startup under the systemd
+drop-in.
 An empty access log gives no evidence of nginx integration. Generate ordinary
 traffic first and confirm the records counter and metrics timestamp advance.
 
@@ -144,9 +151,10 @@ systemd unit if the metrics stop updating.
 To opt into webhook alerts, put `LUREWALL_WEBHOOK_URL` in
 `/etc/lurewall/alerts.env` owned by root with mode 0600, and enable
 `lurewall-notify.timer`. Only the separate notifier contacts the configured
-HTTPS endpoint. Its messages carry fixed event types and can coalesce repeated
-events. Keep the URL private. Protect the journal and metrics as you would
-other operational telemetry.
+HTTPS endpoint. It shares the detector's `lurewall` service user and has its
+own systemd sandbox. Its messages carry fixed event types and can coalesce
+repeated events. Keep the URL private. Protect the journal and metrics as
+you would other operational telemetry.
 
 ## Rotate, upgrade and recover
 
@@ -165,7 +173,9 @@ Upgrade with `sudo ./deploy/manage upgrade` from a chosen newer checkout.
 Check the service and `doctor` afterward. Updates keep the operator configs,
 signing key, checkpoints, reader cursor, engine state and signed log. If
 activation fails, the installer restores the previous executable and unit
-definitions without rewinding evidence. Keep off-host copies of your key and
+definitions without rewinding evidence. It reports the activation error and
+any rollback errors together. A failed release stays on disk when the installer
+cannot confirm that it is safe to remove. Keep off-host copies of your key and
 signed log before upgrading.
 
 Exit status 3 stops automatic restarts after a signed-log integrity failure.
@@ -178,10 +188,15 @@ has the verification and restart steps.
 
 ## Uninstall and qualify a peer deployment
 
-Detach the operator vhost and format include, run `nginx -t`, and reload
-nginx. Then run `sudo ./deploy/manage uninstall`. This removes the managed
-software and units and clears their reserved nftables table. Config, site
-content, key, state, checkpoints and logs remain for recovery or audit.
+Detach the operator vhost or remove its Lurewall `access_log` directive.
+Remove the format include, run `sudo nginx -t`, and successfully reload
+nginx with `sudo systemctl reload nginx`. Then run `sudo ./deploy/manage
+uninstall`. The uninstaller checks the nginx configuration on disk and
+refuses to proceed if it still references the managed log or format, or if
+the check fails. The reload applies the detached config to running workers.
+Successful uninstall removes the managed software and units, drops the
+reserved nftables table, and immediately lifts active Lurewall blocks.
+Config, site content, key, state, checkpoints and logs remain for recovery or audit.
 
 On a disposable Debian/Ubuntu VM or a peer's authorized staging server:
 

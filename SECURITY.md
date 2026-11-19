@@ -31,9 +31,10 @@ project with no bounty and no guaranteed response time.
 
 Lurewall is defensive only. It never scans visitors back, serves an executable
 payload or tries to identify anyone. An optional notifier contacts only the
-operator-configured webhook and sends fixed event types. A
-canary's only effect is one logged request that returns a fixed decoy body
-holding no data. A change that breaks any of these is a security bug.
+operator-configured webhook and sends fixed event types. Nginx logs requests
+to decoys. A v1 request gets a fixed decoy body holding no data, and a v2
+quiet decoy gets the same ordinary 404 response as other missing paths. A
+change that breaks any of these is a security bug.
 
 ## Secrets
 

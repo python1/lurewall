@@ -13,11 +13,14 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from lurewall import accesslog, canaries, engineconfig, labsite, sigconfig, signing, verify
-from lurewall.entry import Entry
+from lurewall import engineconfig
 from lurewall.nft import NftAdapter, NftError, element_for, system_runner
-from lurewall.sources import source_key
+
+if TYPE_CHECKING:
+    from lurewall import verify
+    from lurewall.entry import Entry
 
 MAX_DECISIONS = 200
 _LOG_SAMPLE_BYTES = 512 * 1024
@@ -134,6 +137,8 @@ def change_allowlist(path: Path, operation: str, address: str) -> bool:
 
 
 def _address_source(address: str) -> str:
+    from lurewall.sources import source_key
+
     if "%" in address:
         raise ValueError("provide a single IPv4 or IPv6 address without a zone")
     try:
@@ -229,6 +234,8 @@ def consume_unblock(path: Path, engine) -> bool:
 def explain(
     address: str, log: Path, public_key: str, anchors: list[Path], limit: int
 ) -> tuple[verify.Report, str, int, deque[dict]]:
+    from lurewall import verify
+
     source = _address_source(address)
     if not 1 <= limit <= MAX_DECISIONS:
         raise ValueError(f"limit must be between 1 and {MAX_DECISIONS}")
@@ -266,6 +273,8 @@ class Check:
 def _sample(
     path: Path, config: engineconfig.EngineConfig, require_peer_log: bool
 ) -> tuple[Check, Check]:
+    from lurewall import accesslog
+
     with path.open("rb") as handle:
         size = os.fstat(handle.fileno()).st_size
         start = max(0, size - _LOG_SAMPLE_BYTES)
@@ -349,6 +358,8 @@ def doctor(
     require_peer_log: bool,
 ) -> list[Check]:
     """Read only. Report setup errors without exposing log entries or credentials."""
+    from lurewall import canaries, labsite, sigconfig, signing, verify
+
     checks: list[Check] = []
     try:
         config = engineconfig.load(engine_path)

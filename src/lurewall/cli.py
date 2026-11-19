@@ -640,6 +640,25 @@ def _engine_command(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def _allowlist_command(args: argparse.Namespace) -> int:
+    # The installed root launcher exposes this command from trusted source
+    # only, without site packages or any signing dependency.
+    from lurewall import operator
+
+    try:
+        if args.allow_command == "list":
+            for network in operator.read_allowlist(args.file):
+                print(network)
+        elif operator.change_allowlist(args.file, args.allow_command, args.network):
+            print("Managed allowlist updated. Restart lurewall.service to apply.")
+        else:
+            print("Managed allowlist already matches this request.")
+    except (OSError, ValueError) as exc:
+        print(f"lurewall allowlist: {ascii(str(exc))[1:-1]}", file=sys.stderr)
+        return EXIT_USAGE
+    return EXIT_OK
+
+
 def _operator_command(args: argparse.Namespace) -> int:
     from dataclasses import asdict
 
@@ -665,15 +684,7 @@ def _operator_command(args: argparse.Namespace) -> int:
                 for check in checks:
                     print(f"{check.level.upper()} {check.name}: {check.detail}")
             return EXIT_FAIL if any(check.level == "fail" for check in checks) else EXIT_OK
-        if args.command == "allowlist":
-            if args.allow_command == "list":
-                for network in operator.read_allowlist(args.file):
-                    print(network)
-            elif operator.change_allowlist(args.file, args.allow_command, args.network):
-                print("Managed allowlist updated. Restart lurewall.service to apply.")
-            else:
-                print("Managed allowlist already matches this request.")
-        elif args.command == "unblock":
+        if args.command == "unblock":
             source = operator.queue_unblock(args.operator_dir, args.address)
             print(f"Unblock queued for {source}. Check the signed decisions for completion.")
         else:
@@ -717,7 +728,9 @@ def main(argv: list[str] | None = None) -> int:
         return _service_command(args)
     if args.command in ("status", "alerts"):
         return _engine_command(args)
-    if args.command in ("doctor", "allowlist", "unblock", "explain-decision"):
+    if args.command == "allowlist":
+        return _allowlist_command(args)
+    if args.command in ("doctor", "unblock", "explain-decision"):
         return _operator_command(args)
     if args.command == "notify":
         from lurewall.observability import notify

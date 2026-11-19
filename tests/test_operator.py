@@ -6,7 +6,10 @@ from __future__ import annotations
 import ipaddress
 import json
 import stat
+import subprocess
+import sys
 import time
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -71,6 +74,35 @@ def test_allowlist_path_cannot_be_a_symlink(local):
         operator.read_allowlist(link)
     with pytest.raises(ValueError, match="regular file"):
         operator.change_allowlist(link, "add", SOURCE)
+
+
+def test_allowlist_can_run_from_trusted_source_without_third_party_packages(tmp_path):
+    source_dir = Path(__file__).resolve().parents[1] / "src"
+    allowlist = tmp_path / "allowlist"
+    allowlist.touch()
+    command = (
+        "import sys; sys.path.insert(0, sys.argv.pop(1)); "
+        "from lurewall.cli import main; result = main(sys.argv[1:]); "
+        "assert not any(m in sys.modules for m in ['cryptography', 'lurewall._eureka']); "
+        "sys.exit(result)"
+    )
+    subprocess.run(  # noqa: S603 - fixed interpreter and local test arguments
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            command,
+            str(source_dir),
+            "allowlist",
+            "add",
+            SOURCE,
+            "--file",
+            str(allowlist),
+        ],
+        check=True,
+    )
+    assert allowlist.read_text() == f"{SOURCE}/32\n"
 
 
 def test_unblock_serializes_with_running_service_and_survives_backend_failure(local, capsys):

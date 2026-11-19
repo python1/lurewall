@@ -18,6 +18,10 @@ from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[1]
 ACCOUNT = "lurewall"
+BUILD_ACCOUNT = "lurewall-build"
+SYSTEM_PYTHON = "/usr/bin/python3"
+BUILD_PATH = "PATH=/usr/bin:/bin"
+RUNTIME_PATH = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 MAIN = "lurewall.service"
 TIMERS = ("lurewall-sweeper.timer", "lurewall-notify.timer")
 SERVICES = (
@@ -26,7 +30,21 @@ SERVICES = (
     "lurewall-notify-failure.service",
 )
 PINNED_CRYPTO = Path("third_party/eureka_protocol/src/eureka_daemon/crypto.py")
+MAX_COPY_ENTRIES = 20_000
+MAX_COPY_BYTES = 512 * 1024 * 1024
+MAX_COPY_DEPTH = 32
+PRIVATE_RUN = 'umask 077; cd -- "$HOME" && exec "$@"'
+PYTHON_SETUP = (
+    "import os, sys; sys.path.insert(0, sys.argv.pop(1)); "
+    "os.environ['LUREWALL_EUREKA_CRYPTO'] = sys.argv.pop(1); "
+)
+RUN_CLI = "from lurewall.cli import main; raise SystemExit(main())"
 MANAGED = "lurewall-operator-v1\n"
+OPERATOR_LOG_FORMAT = "lurewall_operator"
+NGINX_DETACH = (
+    "Remove the Lurewall access_log directive and its log-format include, "
+    "then run nginx -t and reload nginx before retrying uninstall."
+)
 
 
 class DeploymentError(RuntimeError):
@@ -70,12 +88,14 @@ def own_directory(path, mode, uid, gid):
 
 
 def command(argv, *, check=True, capture=False):
-    return subprocess.run(argv, check=check, capture_output=capture, text=True)  # noqa: S603
+    return subprocess.run(  # noqa: S603
+        argv, check=check, capture_output=capture, text=True, stdin=subprocess.DEVNULL
+    )
 
 
-def account():
+def account(name=ACCOUNT, home="/var/lib/lurewall"):
     try:
-        user = pwd.getpwnam(ACCOUNT)
+        user = pwd.getpwnam(name)
     except KeyError:
         command(
             [
@@ -84,24 +104,124 @@ def account():
                 "--user-group",
                 "--no-create-home",
                 "--home-dir",
-                "/var/lib/lurewall",
+                home,
                 "--shell",
                 "/usr/sbin/nologin",
-                ACCOUNT,
+                name,
             ]
         )
-        user = pwd.getpwnam(ACCOUNT)
+        user = pwd.getpwnam(name)
     if user.pw_uid == 0 or user.pw_gid == 0 or user.pw_shell != "/usr/sbin/nologin":
-        raise DeploymentError(f"refusing to use an incompatible {ACCOUNT} account")
+        raise DeploymentError(f"refusing to use an incompatible {name} account")
     return user.pw_uid, user.pw_gid
 
 
+def build_account():
+    uid, gid = account(BUILD_ACCOUNT, "/nonexistent")
+    with contextlib.suppress(KeyError):
+        runtime = pwd.getpwnam(ACCOUNT)
+        if uid == runtime.pw_uid or gid == runtime.pw_gid:
+            raise DeploymentError("build and runtime accounts must be separate")
+    if set(os.getgrouplist(BUILD_ACCOUNT, gid)) != {gid}:
+        raise DeploymentError("build account must have no supplementary groups")
+    return uid, gid
+
+
+def open_directory(path, *, dir_fd=None):
+    return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+
+
+def copied_directory(path):
+    path.mkdir()
+    path.chmod(0o755)
+
+
+class CopyTree:
+    """Copy a bounded regular-file tree without trusting source metadata or links."""
+
+    def __init__(self, owner=None):
+        self.owner = owner
+        self.entries = 0
+        self.size = 0
+
+    def check_owner(self, info):
+        if self.owner is not None and info.st_uid != self.owner:
+            raise DeploymentError("unexpected owner in build output")
+
+    def file(self, src, dest, *, dir_fd=None):
+        original = os.stat(src, dir_fd=dir_fd, follow_symlinks=False)
+        if not stat.S_ISREG(original.st_mode) or original.st_nlink != 1:
+            raise DeploymentError("only regular files are allowed in release input")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        fd = os.open(src, flags, dir_fd=dir_fd)
+        with os.fdopen(fd, "rb") as handle:
+            before = os.fstat(handle.fileno())
+            self.check_owner(before)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or (before.st_dev, before.st_ino) != (original.st_dev, original.st_ino)
+            ):
+                raise DeploymentError("release input changed during validation")
+            self.entries += 1
+            self.size += before.st_size
+            if self.entries > MAX_COPY_ENTRIES or self.size > MAX_COPY_BYTES:
+                raise DeploymentError("release input exceeds the deployment copy limit")
+            with dest.open("xb") as output:
+                remaining = before.st_size
+                while remaining and (chunk := handle.read(min(remaining, 1024 * 1024))):
+                    output.write(chunk)
+                    remaining -= len(chunk)
+                after = os.fstat(handle.fileno())
+                if remaining or (after.st_size, after.st_ctime_ns, after.st_mtime_ns) != (
+                    before.st_size,
+                    before.st_ctime_ns,
+                    before.st_mtime_ns,
+                ):
+                    raise DeploymentError("release input changed during copy")
+            dest.chmod(0o444)
+
+    def directory(self, source, destination, *, dir_fd=None, depth=0, exclude=None):
+        fd = open_directory(source, dir_fd=dir_fd)
+        try:
+            self.check_owner(os.fstat(fd))
+            self.entries += 1
+            if depth > MAX_COPY_DEPTH or self.entries > MAX_COPY_ENTRIES:
+                raise DeploymentError("release input exceeds the deployment traversal limit")
+            copied_directory(destination)
+            with os.scandir(fd) as entries:
+                for entry in entries:
+                    if exclude is not None and exclude(entry.name, depth):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        self.directory(
+                            entry.name,
+                            destination / entry.name,
+                            dir_fd=fd,
+                            depth=depth + 1,
+                            exclude=exclude,
+                        )
+                    else:
+                        self.file(entry.name, destination / entry.name, dir_fd=fd)
+        finally:
+            os.close(fd)
+
+
 class Deployment:
-    def __init__(self, source, *, root=Path("/"), run=command, get_account=account):
+    def __init__(
+        self,
+        source,
+        *,
+        root=Path("/"),
+        run=command,
+        get_account=account,
+        get_build_account=build_account,
+    ):
         self.source = source
         self.root = root
         self.run = run
         self.get_account = get_account
+        self.get_build_account = get_build_account
         self.home = root / "opt/lurewall"
         self.marker = self.home / ".operator-managed"
         self.releases = self.home / "releases"
@@ -161,50 +281,136 @@ class Deployment:
         for path in (self.rotation, *(self.systemd / u for u in self.units)):
             ensure_regular(path)
 
+    def run_build(self, work, *args):
+        self.run(
+            [
+                "/usr/sbin/runuser",
+                "-u",
+                BUILD_ACCOUNT,
+                "--",
+                "/usr/bin/env",
+                "-i",
+                BUILD_PATH,
+                f"HOME={work}",
+                "LANG=C.UTF-8",
+                "PIP_CONFIG_FILE=/dev/null",
+                "/bin/sh",
+                "-c",
+                PRIVATE_RUN,
+                BUILD_ACCOUNT,
+                *args,
+            ]
+        )
+
+    @staticmethod
+    def installed_python(release, script, *args, trusted=False):
+        package_path = release / ("trusted" if trusted else "packages")
+        return [
+            SYSTEM_PYTHON,
+            "-I",
+            "-S",
+            "-c",
+            PYTHON_SETUP + script,
+            str(package_path),
+            str(release / "crypto.py"),
+            *args,
+        ]
+
+    def build_packages(self, scratch, release, wheelhouse):
+        uid, gid = self.get_build_account()
+        work = scratch / "work"
+        own_directory(work, 0o700, uid, gid)
+        seed = scratch / "source"
+        copied_directory(seed)
+        source_copy = CopyTree()
+        source_copy.directory(
+            self.source / "src",
+            seed / "src",
+            exclude=lambda name, _depth: (
+                name == "__pycache__" or name.endswith((".pyc", ".pyo", ".egg-info"))
+            ),
+        )
+        for filename in ("pyproject.toml", "README.md", "LICENSE"):
+            source_copy.file(self.source / filename, seed / filename)
+        source_copy.file(self.source / PINNED_CRYPTO, release / "crypto.py")
+        # The privileged allowlist command imports this trusted checkout, never build output.
+        trusted = release / "trusted"
+        copied_directory(trusted)
+        source_copy.directory(seed / "src/lurewall", trusted / "lurewall")
+        strategy = []
+        if wheelhouse is not None:
+            wheel_copy = scratch / "wheels"
+            copied_directory(wheel_copy)
+            wheels = CopyTree()
+            for wheel in wheelhouse.glob("*.whl"):
+                wheels.file(wheel, wheel_copy / wheel.name)
+            strategy = ["--no-index", "--find-links", str(wheel_copy)]
+
+        project = work / "project"
+        self.run_build(
+            work,
+            SYSTEM_PYTHON,
+            "-I",
+            "-S",
+            "-c",
+            "import shutil, sys; shutil.copytree(*sys.argv[1:])",
+            str(seed),
+            str(project),
+        )
+        self.run_build(work, SYSTEM_PYTHON, "-I", "-m", "venv", str(work / "venv"))
+        staged = work / "packages"
+        self.run_build(
+            work,
+            str(work / "venv/bin/python"),
+            "-I",
+            "-m",
+            "pip",
+            "--isolated",
+            "--disable-pip-version-check",
+            "install",
+            "--no-input",
+            "--no-cache-dir",
+            "--target",
+            str(staged),
+            *strategy,
+            str(project),
+        )
+        # Only ordinary files owned by the builder cross into the root-owned release.
+        # The ephemeral venv, pip scripts and its absolute shebangs never run in production.
+        output = CopyTree(owner=uid)
+        output.directory(
+            staged, release / "packages", exclude=lambda name, depth: depth == 0 and name == "bin"
+        )
+        self.run_build(work, *self.installed_python(release, "import lurewall.signing"))
+
+    def write_launcher(self, release):
+        unprivileged = shlex.join(self.installed_python(release, RUN_CLI))
+        trusted = shlex.join(self.installed_python(release, RUN_CLI, trusted=True))
+        launcher = (
+            "#!/bin/sh\n"
+            "uid=$(/usr/bin/id -u) || exit 1\n"
+            'if [ "$uid" = 0 ]; then\n'
+            '    case "${1-}/${2-}" in\n'
+            f'        allowlist/list|allowlist/add|allowlist/remove) exec {trusted} "$@" ;;\n'
+            "    esac\n"
+            f"    exec /usr/sbin/runuser -u {ACCOUNT} -- /usr/bin/env -i {RUNTIME_PATH} "
+            f'LANG=C.UTF-8 HOME=/var/lib/lurewall {unprivileged} "$@"\n'
+            "fi\n"
+            f'exec {unprivileged} "$@"\n'
+        )
+        bindir = release / "bin"
+        copied_directory(bindir)
+        atomic_write(bindir / "lurewall", launcher.encode("utf-8"), mode=0o755)
+
     def build(self, wheelhouse):
         release = Path(tempfile.mkdtemp(dir=self.releases, prefix="release-"))
         release.chmod(0o755)
         try:
-            project = release / "project"
-            shutil.copytree(
-                self.source / "src", project / "src", ignore=shutil.ignore_patterns("__pycache__")
-            )
-            for filename in ("pyproject.toml", "README.md", "LICENSE"):
-                shutil.copyfile(self.source / filename, project / filename)
-            shutil.copyfile(self.source / PINNED_CRYPTO, release / "crypto.py")
-            self.run([sys.executable, "-m", "venv", str(release / "venv")])
-            python = release / "venv/bin/python"
-            strategy = ["--no-index", "--find-links", str(wheelhouse)] if wheelhouse else []
-            self.run(
-                [
-                    str(python),
-                    "-I",
-                    "-m",
-                    "pip",
-                    "--isolated",
-                    "--disable-pip-version-check",
-                    "install",
-                    "--no-input",
-                    *strategy,
-                    str(project),
-                ]
-            )
-            self.run(
-                [
-                    str(python),
-                    "-I",
-                    "-c",
-                    "import os, sys; os.environ['LUREWALL_EUREKA_CRYPTO'] = sys.argv[1]; "
-                    "import lurewall.signing",
-                    str(release / "crypto.py"),
-                ]
-            )
-            bindir = release / "bin"
-            bindir.mkdir()
-            launcher = "#!/bin/sh\n"
-            launcher += f"export LUREWALL_EUREKA_CRYPTO={shlex.quote(str(release / 'crypto.py'))}\n"
-            launcher += f'exec {shlex.quote(str(release / "venv/bin/lurewall"))} "$@"\n'
-            atomic_write(bindir / "lurewall", launcher.encode("utf-8"), mode=0o755)
+            with tempfile.TemporaryDirectory(dir=self.home, prefix=".build-") as temporary:
+                scratch = Path(temporary)
+                scratch.chmod(0o711)
+                self.build_packages(scratch, release, wheelhouse)
+            self.write_launcher(release)
         except BaseException:
             shutil.rmtree(release)
             raise
@@ -297,7 +503,7 @@ class Deployment:
             )
         if not canaries.exists():
             script = (
-                "import sys; from lurewall import canaries, labsite; "
+                "from lurewall import canaries, labsite; "
                 "canaries.save_state(canaries.generate(labsite.site_routes()), sys.argv[1])"
             )
             self.run(
@@ -306,13 +512,7 @@ class Deployment:
                     "-u",
                     ACCOUNT,
                     "--",
-                    "/usr/bin/env",
-                    f"LUREWALL_EUREKA_CRYPTO={release / 'crypto.py'}",
-                    str(release / "venv/bin/python"),
-                    "-I",
-                    "-c",
-                    script,
-                    str(canaries),
+                    *self.installed_python(release, script, str(canaries)),
                 ]
             )
 
@@ -347,8 +547,11 @@ class Deployment:
         own_directory(self.releases, 0o755, *root_ids)
         if not self.marker.exists():
             atomic_write(self.marker, MANAGED.encode("ascii"))
+        snapshot = {
+            path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) if path.exists() else None
+            for path in unit_files
+        }
         release = self.build(wheelhouse)
-        snapshot = {path: path.read_bytes() if path.exists() else None for path in unit_files}
         had_launcher = self.launcher.is_symlink()
         attempted_start = False
         try:
@@ -369,33 +572,80 @@ class Deployment:
                 attempted_start = True
                 self.systemctl("restart", MAIN)
         except (OSError, DeploymentError, subprocess.SubprocessError) as exc:
-            # Restore executable and unit definitions. Never rewind state or evidence.
-            integrity_stop = False
-            if attempted_start:
-                status = self.systemctl(
-                    "show", "-p", "ExecMainStatus", "--value", MAIN, check=False, capture=True
-                )
-                integrity_stop = status.stdout.strip() == "3"
-                stop = ("disable", "--now", MAIN) if action == "install" else ("stop", MAIN)
-                self.systemctl(*stop)
-            self.switch(current)
-            for path, previous in snapshot.items():
-                if previous is None:
-                    path.unlink(missing_ok=True)
-                else:
-                    atomic_write(path, previous)
-            if not had_launcher:
-                self.launcher.unlink(missing_ok=True)
-            self.systemctl("daemon-reload")
-            if active and attempted_start and not integrity_stop:
-                self.systemctl("start", MAIN)
-            shutil.rmtree(release)
-            reason = (
-                " Signed-log integrity stop requires operator recovery." if integrity_stop else ""
+            notes = self.rollback(
+                action, current, release, snapshot, had_launcher, active, attempted_start
             )
-            raise DeploymentError(
-                f"deployment failed. Previous release restored.{reason} {exc}"
-            ) from exc
+            raise DeploymentError("\n".join([f"deployment failed ({exc})", *notes])) from exc
+
+    def rollback(self, action, current, release, snapshot, had_launcher, active, attempted_start):
+        """Restore executable and unit definitions without rewinding evidence."""
+        problems = []
+        notes = []
+
+        def attempt(label, operation, *args, **kwargs):
+            try:
+                result = operation(*args, **kwargs)
+                if isinstance(result, subprocess.CompletedProcess) and result.returncode:
+                    problems.append(f"{label} exited with status {result.returncode}")
+                    return False, result
+                return True, result
+            except (OSError, DeploymentError, subprocess.SubprocessError) as exc:
+                problems.append(f"{label} failed ({exc})")
+                return False, None
+
+        stopped = not attempted_start
+        exit_status = ""
+        if attempted_start:
+            checked, status = attempt(
+                "read failed service status",
+                self.systemctl,
+                "show",
+                "-p",
+                "ExecMainStatus",
+                "--value",
+                MAIN,
+                check=False,
+                capture=True,
+            )
+            if checked:
+                exit_status = (status.stdout or "").strip()
+            stop = ("disable", "--now", MAIN) if action == "install" else ("stop", MAIN)
+            stopped, _ = attempt("systemctl " + stop[0], self.systemctl, *stop, check=False)
+
+        switched, _ = attempt("restore previous release pointer", self.switch, current)
+        units_restored = True
+        for path, previous in snapshot.items():
+            label = f"restore {path.name}"
+            if previous is None:
+                restored, _ = attempt(label, path.unlink, missing_ok=True)
+            else:
+                contents, mode = previous
+                restored, _ = attempt(label, atomic_write, path, contents, mode=mode)
+            units_restored &= restored
+        if not had_launcher:
+            attempt("remove incomplete launcher", self.launcher.unlink, missing_ok=True)
+        attempt("systemctl daemon-reload", self.systemctl, "daemon-reload", check=False)
+
+        def remove_failed_release():
+            if not switched:
+                raise DeploymentError("release pointer could still reference the failed release")
+            if not stopped:
+                status = self.systemctl("is-active", "--quiet", MAIN, check=False)
+                if status.returncode not in (3, 4):
+                    raise DeploymentError("failed release may still be in use")
+            shutil.rmtree(release)
+
+        attempt("remove failed release", remove_failed_release)
+        if exit_status == "3":
+            notes.append("Signed-log integrity stop requires operator recovery.")
+        elif active and attempted_start:
+            if not exit_status.isdecimal() or not (switched and units_restored):
+                problems.append("prior service not restarted because rollback safety is uncertain")
+            else:
+                attempt("systemctl start", self.systemctl, "start", MAIN, check=False)
+        if switched and units_restored:
+            notes.insert(0, "Previous release restored." if current else "Installation reverted.")
+        return [*notes, *(f"Rollback problem: {problem}." for problem in problems)]
 
     def has_firewall(self):
         output = self.run(["/usr/sbin/nft", "-j", "list", "tables"], capture=True)
@@ -418,8 +668,44 @@ class Deployment:
         if self.has_firewall():
             self.run(["/usr/sbin/nft", "delete", "table", "inet", "lurewall"])
 
+    def require_nginx_detached(self):
+        # A full effective config can contain credentials and generated decoy values.
+        # Keep its output in memory and report only a fixed diagnostic.
+        try:
+            result = self.run(["/usr/sbin/nginx", "-T"], check=False, capture=True)
+            if result.returncode != 0 or not any(
+                line.startswith("# configuration file ")
+                for line in (result.stdout or "").splitlines()
+            ):
+                raise ValueError("unavailable nginx configuration")
+            lexer = shlex.shlex(result.stdout, posix=True, punctuation_chars=";{}")
+            lexer.whitespace_split = True
+            access = Path("/") / self.access.relative_to(self.root)
+            real_access = self.access.resolve()
+            after_access_log = False
+            for word in lexer:
+                if word == OPERATOR_LOG_FORMAT or (
+                    word.startswith("/") and Path(os.path.normpath(word)) == access
+                ):
+                    raise DeploymentError(f"nginx still references Lurewall. {NGINX_DETACH}")
+                # Also cover a literal access_log path that points to the managed file.
+                if (
+                    after_access_log
+                    and word.startswith("/")
+                    and (self.root / word.lstrip("/")).resolve() == real_access
+                ):
+                    raise DeploymentError(f"nginx still references Lurewall. {NGINX_DETACH}")
+                after_access_log = word == "access_log"
+        except DeploymentError:
+            raise
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            raise DeploymentError(
+                f"Could not verify that nginx is detached. {NGINX_DETACH}"
+            ) from None
+
     def uninstall(self):
         self.check_destination("uninstall")
+        self.require_nginx_detached()
         enabled_units = [name for name in (MAIN, *TIMERS) if (self.systemd / name).is_file()]
         if enabled_units:
             self.systemctl("disable", "--now", *enabled_units)
@@ -478,7 +764,8 @@ def main():
         print(f"lurewall deployment: {exc}", file=sys.stderr)
         return 1
     if args.action == "uninstall":
-        print("Lurewall removed. Kept config, signing key, logs, and state.")
+        print("Lurewall removed. Its active blocks have been lifted.")
+        print("Retained config, signing key, logs, and state.")
     else:
         print(f"Lurewall {args.action} complete. Inspect with sudo lurewall status.")
         print("Configure only the intended nginx vhost. See the operator guide.")

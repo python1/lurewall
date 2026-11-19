@@ -151,6 +151,10 @@ jobs:
           set -euo pipefail
           sudo ./deploy/manage install
           sudo systemctl is-active --quiet lurewall.service
+          sudo systemctl start lurewall-sweeper.service
+          sudo systemctl start lurewall-notify.service lurewall-notify-failure.service
+          sudo /usr/local/sbin/lurewall allowlist add 192.0.2.88/32
+          sudo /usr/local/sbin/lurewall allowlist remove 192.0.2.88/32
           sudo install -d -m 0755 -o lurewall -g lurewall /srv/lurewall/site
           sudo -u lurewall /usr/local/sbin/lurewall lab-site build \
             --state /var/lib/lurewall/canaries.json --out /srv/lurewall/site \
@@ -176,7 +180,8 @@ jobs:
           done
           sudo grep -Eq '^lurewall_records_processed_total [1-9][0-9]*$' \
             /var/lib/lurewall/telemetry/lurewall.prom
-          sudo /usr/local/sbin/lurewall doctor
+          sudo /usr/local/sbin/lurewall doctor --json | python3 -c \
+            'import json,sys; check=next(x for x in json.load(sys.stdin) if x["name"]=="permissions"); assert check["level"]=="pass",check'
           sudo nft -j list tables | python3 -c \
             'import json,sys; assert all(x.get("table",{}).get("name") != "lurewall" for x in json.load(sys.stdin)["nftables"])'
 
@@ -213,6 +218,11 @@ jobs:
           test "$log_inode" = "$(sudo stat -c %i /var/lib/lurewall/events.log)"
           sudo /usr/local/sbin/lurewall doctor
 
+          if sudo ./deploy/manage uninstall; then
+            echo "Uninstall should refuse an active nginx include" >&2
+            exit 1
+          fi
+          sudo systemctl is-active --quiet lurewall.service
           sudo rm /etc/nginx/sites-enabled/lurewall-ci /etc/nginx/conf.d/lurewall-ci.conf
           sudo nginx -t
           sudo systemctl reload nginx
