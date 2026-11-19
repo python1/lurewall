@@ -7,12 +7,14 @@ import runpy
 import shutil
 import stat
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 BUILDER = runpy.run_path(str(REPO / "deploy/debian/build"))
+VERSION = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["version"]
 
 
 def test_staged_payload_uses_source_git_and_ships_observe_only_defaults(tmp_path):
@@ -85,7 +87,7 @@ def test_build_uses_root_owned_archive_explicit_xz_and_source_timestamp(tmp_path
     monkeypatch.setattr(subprocess, "run", command)
     commit = BUILDER["source_commit"](REPO, None)
     package = BUILDER["build"](REPO, commit, None, tmp_path)
-    assert seen == [f"lurewall_0.1.0~deb1+g{commit[:12]}_all.deb"]
+    assert seen == [f"lurewall_{VERSION}~deb1+g{commit[:12]}_all.deb"]
     assert package.read_bytes() == b"mock package evidence\n"
     assert list(tmp_path.iterdir()) == [package]
 
