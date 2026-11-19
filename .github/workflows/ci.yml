@@ -162,8 +162,11 @@ jobs:
           sudo systemctl start nginx
           sudo systemctl reload nginx
 
-          curl --fail --silent --show-error --noproxy '*' --retry 5 --retry-connrefused \
-            --resolve lurewall.example:18119:127.0.0.1 http://lurewall.example:18119/ >/dev/null
+          visit_site() {
+            curl --fail --silent --show-error --noproxy '*' --retry 5 --retry-connrefused \
+              --resolve lurewall.example:18119:127.0.0.1 http://lurewall.example:18119/ >/dev/null
+          }
+          visit_site
           for attempt in {1..25}; do
             if sudo grep -Eq '^lurewall_records_processed_total [1-9][0-9]*$' \
               /var/lib/lurewall/telemetry/lurewall.prom; then
@@ -176,6 +179,31 @@ jobs:
           sudo /usr/local/sbin/lurewall doctor
           sudo nft -j list tables | python3 -c \
             'import json,sys; assert all(x.get("table",{}).get("name") != "lurewall" for x in json.load(sys.stdin)["nftables"])'
+
+          sudo logrotate --force --state "$RUNNER_TEMP/lurewall-logrotate.state" /etc/logrotate.d/lurewall
+          sudo test -s /var/log/lurewall/access.jsonl.1
+          for attempt in {1..15}; do
+            visit_site
+            if sudo -u lurewall test -s /var/log/lurewall/access.jsonl; then
+              break
+            fi
+            sleep 1
+          done
+          sudo -u lurewall test -s /var/log/lurewall/access.jsonl
+          cursor_followed_rotation() {
+            sudo python3 -c '
+          import json
+          from pathlib import Path
+          log = Path("/var/log/lurewall/access.jsonl")
+          cursor = json.loads(Path("/var/lib/lurewall/reader.state").read_text())
+          assert cursor["inode"] == log.stat().st_ino and cursor["offset"] > 0
+          '
+          }
+          for attempt in {1..15}; do
+            if cursor_followed_rotation 2>/dev/null; then break; fi
+            sleep 1
+          done
+          cursor_followed_rotation
 
           public_key=$(sudo /usr/local/sbin/lurewall pubkey --key /var/lib/lurewall/keys/lurewall.key)
           log_inode=$(sudo stat -c %i /var/lib/lurewall/events.log)

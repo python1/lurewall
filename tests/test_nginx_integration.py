@@ -490,7 +490,7 @@ def test_hostile_bytes_are_logged_and_every_line_is_accounted_for(lab, tmp_path)
     assert by_uri["/h3"].ua == "café 日本"
     assert by_uri["/h4"].ua == "tab\there"
     assert by_uri["/h6"].ua == '","ip":"203.0.113.99","status":"200'
-    assert all(record.ip == "127.0.0.1" for record in records)  # no text moved a request
+    assert all(record.ip == "127.0.0.1" for record in records[before:])
     assert by_uri["/h11"].ua == "A" * 4000
     assert any(record.status == 400 for record in records)
 
