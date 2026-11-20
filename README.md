@@ -20,8 +20,6 @@ Case study: [docs/case-study.md](docs/case-study.md). Full lab findings:
 
 ## v0.3.0 operator workflow
 
-Created by Paul Charydczak.
-
 Build natural references from a local public site root and its sitemap or a
 private operator wordlist. The default placement is a footer comment. An
 existing robots.txt rule group can carry an optional recon reference that
@@ -80,6 +78,10 @@ isolated container. Details, run IDs and substitutions are in
   doubling, but not the block itself.
 - **Split addresses.** A client that reads pages from one address and probes
   from another is not blocked.
+- **Per-visitor paths can be spotted.** v0.3.0's natural placements give each
+  source its own path. An agent that fetches the same page from two different
+  IP addresses and compares them can see that the reference differs, and so
+  tell that the page is personalized.
 - **The log's newest entries.** Entries after the last anchored checkpoint
   can't be proven complete. In the lab that tail was at most about 10
   minutes: a checkpoint is written at least every 5 minutes and pulled off the
