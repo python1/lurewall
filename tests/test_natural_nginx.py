@@ -159,6 +159,21 @@ def test_real_njs_pair_reuses_path_and_report_is_script_free(tmp_path, capsys):
         assert get("/", source_a)[1]["ETag"] == headers["ETag"]
         assert get("/", source_a)[2] == body and "Last-Modified" in headers
         assert get("/", source_a, {"If-None-Match": headers["ETag"]})[0] == 304
+        assert get("/", source_a, {"If-None-Match": f"W/{headers['ETag']}"})[0] == 304
+        assert get("/", source_a, {"If-Modified-Since": headers["Last-Modified"]})[0] == 304
+        # If-None-Match takes precedence: a stale tag gets the full body.
+        stale = {"If-None-Match": '"0"', "If-Modified-Since": headers["Last-Modified"]}
+        assert get("/", source_a, stale)[0] == 200
+        # Seven requests so far: four 200s delivered the path, three 304s did not.
+        # nginx logs after replying, so wait for every line before counting.
+        for _ in range(100):
+            lines = access.read_text().splitlines()
+            if len(lines) >= 7:
+                break
+            time.sleep(0.05)
+        assert len(lines) == 7
+        assert sum(json.loads(line)["lw_path"] == ref for line in lines) == 4
+        assert [json.loads(line)["status"] for line in lines].count("304") == 3
         assert (
             get(ref, source_b)[::2]
             == get("/fixture-missing", source_b)[::2]

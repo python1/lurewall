@@ -1,6 +1,52 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """nginx njs request handler. PROFILE is supplied by the local vhost build."""
 
+from __future__ import annotations
+
+import subprocess
+from collections.abc import Callable
+from pathlib import Path
+
+# The Debian package only Suggests the module, because Debian enables an installed
+# nginx module for every vhost. Natural placements check for it before use.
+NJS_PACKAGE = "libnginx-mod-http-js"
+NJS_MINIMUM = "0.8.2"
+NJS_MODULE = Path("/usr/lib/nginx/modules/ngx_http_js_module.so")
+NJS_INSTALL = (
+    f"Natural placements need {NJS_PACKAGE} {NJS_MINIMUM} or newer. "
+    f"Install it with: sudo apt install {NJS_PACKAGE}"
+)
+
+
+def _run(argv: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(  # noqa: S603 - fixed binaries and arguments
+        argv, capture_output=True, text=True, check=False, timeout=30, stdin=subprocess.DEVNULL
+    )
+
+
+def njs_problem(
+    run: Callable[[list[str]], subprocess.CompletedProcess] = _run,
+    module: Path = NJS_MODULE,
+) -> str | None:
+    """None when the njs module package is installed and new enough, else why not."""
+    try:
+        query = run(["/usr/bin/dpkg-query", "-W", "-f=${db:Status-Status} ${Version}", NJS_PACKAGE])
+    except (OSError, subprocess.SubprocessError):
+        return f"Could not confirm {NJS_PACKAGE} with dpkg-query. {NJS_INSTALL}"
+    status, _, version = (query.stdout or "").strip().partition(" ")
+    if query.returncode != 0 or status != "installed" or not version:
+        return f"{NJS_PACKAGE} is not installed. {NJS_INSTALL}"
+    try:
+        newer = run(["/usr/bin/dpkg", "--compare-versions", version, "ge", NJS_MINIMUM])
+    except (OSError, subprocess.SubprocessError):
+        return f"Could not compare the {NJS_PACKAGE} version. {NJS_INSTALL}"
+    if newer.returncode != 0:
+        return f"{NJS_PACKAGE} {ascii(version)[1:-1]} is too old. {NJS_INSTALL}"
+    if not module.is_file():
+        return f"{NJS_PACKAGE} is installed but {module} is missing. Reinstall {NJS_PACKAGE}."
+    return None
+
+
 JAVASCRIPT = r"""
 import crypto from 'crypto';
 import fs from 'fs';
@@ -107,6 +153,23 @@ function reference(carrier, row) {
     return '';
 }
 
+// RFC 9110 section 13.2.2: If-None-Match (weak comparison) takes precedence;
+// If-Modified-Since applies only without it.
+function notModified(r, etag, modified) {
+    var match = r.headersIn['If-None-Match'];
+    if (match !== undefined) {
+        return match.split(',').some(function (tag) {
+            tag = tag.trim();
+            if (tag.slice(0, 2) === 'W/') tag = tag.slice(2);
+            return tag === etag || tag === '*';
+        });
+    }
+    var since = r.headersIn['If-Modified-Since'];
+    if (since === undefined) return false;
+    var when = Date.parse(since);
+    return !isNaN(when) && Math.floor(when / 1000) >= modified;
+}
+
 async function serve(r) {
     var c = PROFILE.carriers[r.uri];
     if (!c) { r.return(404); return; }
@@ -137,14 +200,22 @@ async function serve(r) {
         }
         if (!path) { r.internalRedirect(c.fallback); return; }
         body = Buffer.from(c.before + path + c.after);
+        // The path changes only with a new lease, so the lease start bounds the body's age.
+        var modified = Math.min(Math.max(mtime, row.start), now);
+        var etag = '"' + crypto.createHash('sha256').update(body).digest('hex') + '"';
+        r.headersOut['Content-Type'] = c.type;
+        r.headersOut['Cache-Control'] = 'private, no-cache';
+        r.headersOut['ETag'] = etag;
+        r.headersOut['Last-Modified'] = new Date(modified * 1000).toUTCString();
+        if (notModified(r, etag, modified)) {
+            // No body, so no path, leaves in a 304. The issuance logged with the
+            // client's original 200 stays valid until its lease ends.
+            r.return(304);
+            return;
+        }
         r.variables.lw_placement = c.id;
         r.variables.lw_path = path;
         r.variables.lw_until = String(row.until);
-        // Conditional requests and HEAD must never be interpreted as issuing a body.
-        r.headersOut['Content-Type'] = c.type;
-        r.headersOut['Cache-Control'] = 'private, no-cache';
-        r.headersOut['ETag'] = '"' + crypto.createHash('sha256').update(body).digest('hex') + '"';
-        r.headersOut['Last-Modified'] = new Date(mtime * 1000).toUTCString();
         r.return(200, body);
     } catch (e) {
         r.internalRedirect(c.fallback);

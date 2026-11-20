@@ -83,6 +83,15 @@ def test_fresh_configuration_initializes_private_state_without_enforcement(tmp_p
     assert all(call[1:4] == ("-u", "lurewall", "--") for call in host.calls if "keygen" in call)
 
 
+def test_configuration_warns_about_rollback_only_once_natural_mode_is_built(tmp_path, capsys):
+    lifecycle, _host = target(tmp_path)
+    lifecycle.configure()
+    assert "natural placements are enabled" not in capsys.readouterr().err
+    (lifecycle.state / "canaries.json.v3").write_text("private fixture\n")
+    lifecycle.configure()
+    assert "restore the previous vhost" in capsys.readouterr().err
+
+
 def test_offline_configuration_queues_only_observer_for_boot(tmp_path):
     lifecycle, host = target(tmp_path, live=False)
     host.kernel = False

@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from lurewall import natural_runtime
+
 REPO = Path(__file__).resolve().parents[1]
 BUILDER = runpy.run_path(str(REPO / "deploy/debian/build"))
 VERSION = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["version"]
@@ -30,7 +32,13 @@ def test_staged_payload_uses_source_git_and_ships_observe_only_defaults(tmp_path
     engine = (tmp_path / "etc/lurewall/engine.toml").read_text()
     assert "dry_run = true" in engine
     assert 'adapter = "log-only"' in engine
-    assert "Architecture: all" in (tmp_path / "DEBIAN/control").read_text()
+    control = (tmp_path / "DEBIAN/control").read_text()
+    assert "Architecture: all" in control
+    # The njs module is opt-in: never pulled in (Depends or Recommends) by default.
+    depends = control.split("Depends:", 1)[1].split("Homepage:", 1)[0].split("Suggests:", 1)[0]
+    assert "libnginx-mod-http-js" not in depends and "Recommends:" not in control
+    floor = f"{natural_runtime.NJS_PACKAGE} (>= {natural_runtime.NJS_MINIMUM})"
+    assert f"Suggests: {floor}\n" in control
     declared = (tmp_path / "DEBIAN/conffiles").read_text().splitlines()
     assert declared == sorted(
         "/" + str(path.relative_to(tmp_path))

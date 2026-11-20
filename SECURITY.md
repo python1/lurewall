@@ -55,8 +55,12 @@ control enforcement. Cross-IP reuse contributes zero enforcement evidence.
 
 The nginx lease files contain a keyed source tag and start/expiry timestamps.
 Expired leases cease to apply immediately and are reclaimed when their bucket
-is next written. The bounded in-memory issuance index loses its bindings on
-detector restart. The next eligible carrier fetch rebuilds its receipt. Private
+is next written. The detector keeps its issuance index in memory and saves
+the newest live receipts to `/var/lib/lurewall/engine.json.receipts`. That
+file is mode 0600 and bounded at 10,000 receipts and 4 MiB. Each receipt holds
+the issued path, its source key, placement, issuance and expiry times, the page
+request ID and a line digest. Expired receipts are dropped when the file is
+next written and are never restored. Private
 nginx access logs can contain both source and full paths. The shipped rotation
 keeps seven prior access-log files, rotating daily or on size.
 

@@ -97,10 +97,16 @@ shapes. If the site is small, pass `--wordlist FILE` with locally chosen
 words. The build never downloads a sitemap. Use a fresh private staging
 directory outside the public root and outside Git.
 
-Install `libnginx-mod-http-js` for source deployments. The Debian package
-includes the dependency. With `PUBLIC_ROOT` and `VHOST` set for your site:
+Natural placements need nginx's njs module, `libnginx-mod-http-js` 0.8.2 or
+newer. The Debian package only suggests it, so a default install does not add
+it. Debian enables an installed nginx module for every vhost and reloads nginx,
+so install it only when you choose natural placements. On Ubuntu it comes from
+the universe component. `lab-site build --site-root` and `doctor` refuse
+natural mode and name the fix if the module is missing or too old. With
+`PUBLIC_ROOT` and `VHOST` set for your site:
 
 ```sh
+sudo apt install libnginx-mod-http-js
 sudo install -d -o lurewall -g lurewall -m 0700 /var/lib/lurewall/build-v3
 sudo -u lurewall lurewall lab-site build --site-root "$PUBLIC_ROOT" \
   --server-name "$VHOST" --state /var/lib/lurewall/canaries.json \
@@ -124,9 +130,12 @@ Only the existing landing page receives a footer by default. To enable the
 other placements use `--placements footer,robots,security`. The builder
 preserves the resource's existing text and skips unavailable or unsupported
 carriers. Signed, malformed or expired security files stay untouched. Source
-windows are jittered from three to seven days. Check online cache bypass,
-ordinary 404 handling, and conditional GETs after deployment. Changed carrier
-files are served without injection until the next build.
+windows are jittered from three to seven days. A conditional GET whose
+`If-None-Match` or `If-Modified-Since` matches gets a 304 with no body. A 304
+carries no path, so it is not logged as an issuance. The 200 that first
+delivered the path stays valid until its window ends. Check online cache
+bypass, ordinary 404 handling, and conditional GETs after deployment. Changed
+carrier files are served without injection until the next build.
 
 ```sh
 sudo lurewall doctor
@@ -147,8 +156,11 @@ Prometheus source scraping the existing textfile metrics.
 **Limits.** Comparing carrier bodies from two IPs can reveal personalization.
 A pool rotating addresses on every request cannot be linked into a single
 agent. A third address reusing a copied path produces fan-out and ambiguous
-attribution. A detector restart forgets outstanding in-memory receipts until
-the carrier is served again. These are observations about requests, not
+attribution. The detector saves issuance receipts in the private
+`/var/lib/lurewall/engine.json.receipts`, so they survive a restart. It keeps
+at most the 10,000 most recently issued live receipts, in at most 4 MiB. On a
+busier site, an older path issued before a restart is an ordinary 404 until
+that source loads the carrier again. These are observations about requests, not
 verified identities. See [privacy and retention](../SECURITY.md#address-correlation-and-retention).
 
 ## Verify and operate
@@ -256,9 +268,26 @@ their own.
 
 The natural build adds a private `canaries.json.v3` sidecar. Keep the original
 `canaries.json`, engine and signals configs, engine state, signed evidence, and
-old vhost configuration. To roll back, restore the previous nginx vhost and
-format, test and reload nginx, and use the prior package. The v0.2 executable
-opens its original state. To return a v0.3 executable to legacy rendering,
+old vhost configuration.
+
+**Rolling back to v0.2.x after enabling natural placements: nginx first.**
+v0.2.x cannot parse the natural log format. If the package is rolled back
+while the natural vhost is still logging, v0.2.x records every request as a
+parse failure and detects nothing. `doctor` warns about this whenever natural
+placements are enabled. Package installs and upgrades print the same warning,
+and so does a downgrade below v0.3. Roll back in this order:
+
+1. Restore the previous vhost and log-format include, run `sudo nginx -t`
+   and reload nginx.
+2. Install the prior package.
+3. Restart `lurewall.service`, run `sudo lurewall doctor`, and confirm the
+   records counter advances.
+
+The v0.2 executable opens its original state and ignores the sidecar and the
+receipts file. After a rollback, any address that took natural bait in the
+last seven days is labelled `v1-imperative`/`ai` in later decisions. A
+robots-file placement would otherwise be `recon`. To return a v0.3 executable
+to legacy rendering,
 move the sidecar aside privately and restart the detector with the legacy
 vhost. Stage changes while observing and keep the previous generated files
 until the new deployment is qualified.

@@ -51,6 +51,7 @@ from lurewall.collector import Observation
 from lurewall.engineconfig import EngineConfig, Network
 from lurewall.logreader import Sink
 from lurewall.nft import ReconcileReport
+from lurewall.pathbindings import MAX_STATE_BYTES as MAX_RECEIPTS_BYTES
 from lurewall.pathbindings import Issuance, IssuedPaths
 from lurewall.sigconfig import MIN_DISTINCT_ATTACK_SIGNALS
 from lurewall.sources import SignalTracker
@@ -132,6 +133,11 @@ def ack_path(state_path: Path) -> Path:
     return state_path.with_name(state_path.name + ".ack")
 
 
+def receipts_path(state_path: Path) -> Path:
+    """Saved natural issuance receipts. Private: it holds issued paths."""
+    return state_path.with_name(state_path.name + ".receipts")
+
+
 def _is_ms(value: object) -> bool:
     return type(value) is int and 0 <= value < 2**53
 
@@ -180,6 +186,8 @@ class Engine:
         self._reconcile_retry: tuple[int, int] | None = None  # last attempt end, delay
         if self._state_path is not None:
             self._load()
+            if self._issued_paths is not None:
+                self._load_receipts()
 
     # -- public ----------------------------------------------------------------------
 
@@ -751,13 +759,42 @@ class Engine:
         }
 
     def _save(self, now: int, *, force: bool = False) -> None:
-        if self._state_path is None or not self._dirty:
+        if self._state_path is None:
+            return
+        receipts = self._issued_paths is not None and self._issued_paths.dirty
+        if not (self._dirty or receipts):
             return
         if not force and 0 <= now - self._last_save < _SAVE_INTERVAL_MS:
             return
-        write_private(self._state_path, json.dumps(self._snapshot(), sort_keys=True).encode())
-        self._dirty = False
+        if self._dirty:
+            write_private(self._state_path, json.dumps(self._snapshot(), sort_keys=True).encode())
+            self._dirty = False
+        if receipts:
+            # A separate file keeps engine.json in the v0.2 shape, so a rollback still reads it.
+            write_private(receipts_path(self._state_path), self._issued_paths.dumps(now))
+            self._issued_paths.dirty = False
         self._last_save = now
+
+    def _load_receipts(self) -> None:
+        path = receipts_path(self._state_path)
+        try:
+            with path.open("rb") as handle:
+                raw = handle.read(MAX_RECEIPTS_BYTES + 1)
+        except FileNotFoundError:
+            return
+        except OSError:
+            self._sink.append(
+                "engine_state_invalid", None, {"reason": "unreadable", "file": "receipts"}
+            )
+            return
+        try:
+            self._issued_paths.loads(raw, self._clock(), _checked_source)
+        except (ValueError, UnicodeDecodeError):
+            # Start without receipts: hits on earlier paths are then not bound,
+            # which only ever means fewer counted hits and fewer reported switches.
+            self._sink.append(
+                "engine_state_invalid", None, {"reason": "malformed", "file": "receipts"}
+            )
 
     def _load(self) -> None:
         try:

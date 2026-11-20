@@ -438,8 +438,11 @@ def _canary_command(args: argparse.Namespace) -> int:
     try:
         if args.command == "lab-site":
             if args.site_root is not None:
-                from lurewall import naturalsite
+                from lurewall import natural_runtime, naturalsite
 
+                # The generated vhost needs the njs module; refuse before writing anything.
+                if (problem := natural_runtime.njs_problem()) is not None:
+                    raise labsite.BuildError(problem)
                 conf = naturalsite.build(
                     state=args.state,
                     site_root=args.site_root,
