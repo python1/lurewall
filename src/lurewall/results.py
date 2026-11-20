@@ -24,7 +24,7 @@ from pathlib import Path
 from lurewall import entry as entry_mod
 from lurewall.canaries import AI, V1_IMPERATIVE, V2_QUIET
 from lurewall.entry import Entry, EntryError
-from lurewall.labcases import CASES
+from lurewall.labcases import CASES, SWITCH_PROBES
 from lurewall.sources import source_key
 from lurewall.verify import Report, verify_log
 
@@ -99,6 +99,7 @@ class RunResult:
     families: Counter = field(default_factory=Counter)  # (family, signal) -> hits
     would_reasons: Counter = field(default_factory=Counter)  # why a would_block was not a block
     signal_keys: set = field(default_factory=set)
+    matching_relay: bool = False
     counted_hits: int = 0
     dry_run: bool | None = None
     verdict: str = RECORD
@@ -139,6 +140,12 @@ def _collect(result: RunResult, entries: list[Entry]) -> None:
             if kind == "canary_hit":
                 result.counted_hits += weight  # a roll-up cannot show counted: assume it was
         result.counts[kind] += weight
+        if run["case"] == 21 and item.type == "canary_relayed":
+            expected = run.get("expected_issuer")
+            if isinstance(expected, str):
+                issuer = source_key(expected)
+                if issuer != source and item.detail.get("issued_to") == issuer:
+                    result.matching_relay = True
         if item.type == "would_block":
             result.would_reasons[str(item.detail.get("reason"))] += 1
         if item.type == "decision":
@@ -205,6 +212,16 @@ def _judge(result: RunResult) -> None:
         verdict(
             t["canary_relayed"] >= 1 and result.counted_hits == 0 and acted == 0,
             f"{t['canary_relayed']} relayed",
+        )
+    elif case == 21 and run.get("part") == "probe":
+        probe_keys = {"path:" + path for path in SWITCH_PROBES}
+        verdict(
+            result.matching_relay
+            and probe_keys <= result.signal_keys
+            and result.counted_hits == 0
+            and acted + t["block_applied"] == 0,
+            f"matching relay {result.matching_relay}, "
+            f"{len(probe_keys & result.signal_keys)} of two lab probes, {acted} decisions",
         )
     elif case == 12 and run.get("part") == "probe":
         result.verdict = LIMIT if acted == 0 else FAIL

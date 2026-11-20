@@ -234,7 +234,7 @@ def consume_unblock(path: Path, engine) -> bool:
 def explain(
     address: str, log: Path, public_key: str, anchors: list[Path], limit: int
 ) -> tuple[verify.Report, str, int, deque[dict]]:
-    from lurewall import verify
+    from lurewall import reporting, verify
 
     source = _address_source(address)
     if not 1 <= limit <= MAX_DECISIONS:
@@ -244,18 +244,28 @@ def explain(
 
     def visit(item: Entry) -> None:
         nonlocal matched
-        if item.source != source:
+        switch = reporting.possible_switch(item)
+        if item.source != source and (switch is None or switch.issuer != source):
             return
         kind = item.detail.get("of") if item.type == "rollup" else item.type
         if not isinstance(kind, str) or kind not in _DECISION_EVENTS:
             return
         matched += 1
+        details = {key: value for key, value in item.detail.items() if key in _DETAIL_KEYS}
+        if switch is not None:
+            # Relay details use a separate, strictly typed projection on both endpoints.
+            details = {
+                "issued_to": switch.issuer,
+                "requested_by": switch.requester,
+                "observation": switch.description(),
+                "enforcement_effect": "none",
+            }
         history.append(
             {
                 "seq": item.seq,
                 "ts_ms": item.ts,
                 "type": item.type,
-                "detail": {key: value for key, value in item.detail.items() if key in _DETAIL_KEYS},
+                "detail": details,
             }
         )
 
@@ -344,6 +354,30 @@ def unit_state() -> str:
     )
 
 
+NATURAL_ROLLBACK = (
+    "natural placements are enabled. Before installing v0.2.x, restore the previous vhost "
+    "and log-format include, run nginx -t and reload nginx: v0.2.x cannot parse natural "
+    "log lines and would record every request as a parse failure"
+)
+
+
+def natural_checks(njs_problem=None) -> list[Check]:
+    """Checks that apply once a natural vhost has been built (the .v3 sidecar exists)."""
+    from lurewall import natural_runtime
+
+    problem = (njs_problem or natural_runtime.njs_problem)()
+    njs = (
+        Check("njs module", "fail", problem)
+        if problem is not None
+        else Check(
+            "njs module",
+            "pass",
+            f"{natural_runtime.NJS_PACKAGE} {natural_runtime.NJS_MINIMUM} or newer is installed",
+        )
+    )
+    return [njs, Check("rollback", "warn", NATURAL_ROLLBACK)]
+
+
 def doctor(
     *,
     engine_path: Path,
@@ -387,6 +421,8 @@ def doctor(
         checks.append(
             Check("listener scope", "fail", "set enforcement.tcp_ports before using a real server")
         )
+    if canaries.natural_state_path(canaries_path).exists():
+        checks.extend(natural_checks())
 
     try:
         paths = ((access_log, os.R_OK), (event_log.parent, os.W_OK | os.X_OK))

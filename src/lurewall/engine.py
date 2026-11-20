@@ -51,6 +51,8 @@ from lurewall.collector import Observation
 from lurewall.engineconfig import EngineConfig, Network
 from lurewall.logreader import Sink
 from lurewall.nft import ReconcileReport
+from lurewall.pathbindings import MAX_STATE_BYTES as MAX_RECEIPTS_BYTES
+from lurewall.pathbindings import Issuance, IssuedPaths
 from lurewall.sigconfig import MIN_DISTINCT_ATTACK_SIGNALS
 from lurewall.sources import SignalTracker
 
@@ -131,6 +133,11 @@ def ack_path(state_path: Path) -> Path:
     return state_path.with_name(state_path.name + ".ack")
 
 
+def receipts_path(state_path: Path) -> Path:
+    """Saved natural issuance receipts. Private: it holds issued paths."""
+    return state_path.with_name(state_path.name + ".receipts")
+
+
 def _is_ms(value: object) -> bool:
     return type(value) is int and 0 <= value < 2**53
 
@@ -144,6 +151,7 @@ class Engine:
         *,
         adapter: Adapter | None = None,
         state_path: str | Path | None = None,
+        issued_paths: IssuedPaths | None = None,
         clock: Callable[[], int] = _now_ms,
         alert: Callable[[str], None] = journal_alert,
     ) -> None:
@@ -153,13 +161,14 @@ class Engine:
         self._adapter = adapter if adapter is not None else LogOnlyAdapter()
         self._enforcing = config.enforcing and not isinstance(self._adapter, LogOnlyAdapter)
         self._clock = clock
+        self._issued_paths = issued_paths
         self._alert_out = alert
         self._state_path = None if state_path is None else Path(state_path)
         if self._state_path is not None:
             refuse_git_work_tree(self._state_path.parent, "engine state location")
 
-        # request ID -> (source it was issued to, when)
-        self._issued: OrderedDict[str, tuple[str, int]] = OrderedDict()
+        # Legacy request ID -> (source it was issued to, when, private access-line digest)
+        self._issued: OrderedDict[str, tuple[str, int, str]] = OrderedDict()
         self._issued_by: dict[str, deque[str]] = {}
         # (source, quiet canary id) -> when the page carrying it was last served
         self._served: OrderedDict[tuple[str, str], int] = OrderedDict()
@@ -177,6 +186,8 @@ class Engine:
         self._reconcile_retry: tuple[int, int] | None = None  # last attempt end, delay
         if self._state_path is not None:
             self._load()
+            if self._issued_paths is not None:
+                self._load_receipts()
 
     # -- public ----------------------------------------------------------------------
 
@@ -194,13 +205,28 @@ class Engine:
             observation = replace(observation, view=view)
 
         counted_now = False
-        if result.canary is None:
-            # Any page nginx served this source may carry canary references
-            # stamped with this request's ID.
-            self._issue(record.request_id, source, record.ts_ms)
+        if result.canary is None and result.cross_site is None:
+            if self._issued_paths is None:
+                self._issue(record.request_id, source, record.ts_ms, record.line_sha256)
+            elif result.issue_until_ms is not None:
+                receipt = Issuance(
+                    source,
+                    record.lw_placement,
+                    record.ts_ms,
+                    result.issue_until_ms,
+                    record.request_id,
+                    record.line_sha256,
+                )
+                if not self._issued_paths.record(record.lw_path, receipt):
+                    self._sink.append(
+                        "engine_state_evicted",
+                        None,
+                        {"table": "natural_issuance"},
+                        rollup_key="natural_issuance",
+                    )
             for canary_id in result.carries:
                 self._serve(source, canary_id, record.ts_ms)
-        elif result.cross_site is None:
+        elif result.canary is not None and result.cross_site is None:
             counted_now = self._canary_request(observation)
         # A cross-site decoy request counts for nothing; the collector logged it.
 
@@ -348,6 +374,8 @@ class Engine:
             self._issued.pop(request_id, None)
         for key in [key for key in self._served if key[0] == source]:
             self._served.pop(key)
+        if self._issued_paths is not None:
+            self._issued_paths.forget(source)
         if block is not None or had_hit:
             # A restart must not restore the released block even if nft is unavailable.
             self._dirty = True
@@ -375,7 +403,7 @@ class Engine:
 
     # -- request-ID binding ---------------------------------------------------------------
 
-    def _issue(self, request_id: str, source: str, when: int) -> None:
+    def _issue(self, request_id: str, source: str, when: int, line: str) -> None:
         known = self._issued.get(request_id)
         if known is not None:
             return  # a line read twice, or an ID already bound: first issue wins
@@ -384,7 +412,7 @@ class Engine:
             # A source rotates out its own oldest IDs before anyone else's.
             self._issued.pop(mine.popleft(), None)
         while len(self._issued) >= self.config.max_issued_ids:
-            old_id, (old_source, _when) = self._issued.popitem(last=False)
+            old_id, (old_source, _when, _line) = self._issued.popitem(last=False)
             theirs = self._issued_by.get(old_source)
             if theirs:
                 with contextlib.suppress(ValueError):
@@ -392,7 +420,7 @@ class Engine:
                 if not theirs:
                     del self._issued_by[old_source]
             self._sink.append("engine_state_evicted", None, {"table": "issued_id"}, rollup_key="id")
-        self._issued[request_id] = (source, when)
+        self._issued[request_id] = (source, when, line)
         mine.append(request_id)
         self._issued_by[source] = mine
 
@@ -434,6 +462,30 @@ class Engine:
         if record.stale:
             detail["stale"] = True
 
+        receipt = observation.classification.receipt
+        if receipt is not None:
+            detail["family"] = "v3-natural"
+            if receipt.source is None:
+                self._sink.append(
+                    "canary_unbound",
+                    source,
+                    {**detail, "reason": "ambiguous_issuance"},
+                    rollup_key="ambiguous_issuance",
+                )
+                return False
+            detail.update(
+                page_request_id=receipt.page_request_id,
+                page_line=receipt.page_line,
+                issued_at_ms=receipt.issued_ms,
+                expires_at_ms=receipt.until_ms,
+            )
+            if not counts_toward_block(canary.id):
+                return self._quiet_request(observation, detail)
+            if receipt.source != source:
+                self._relay(source, receipt.source, detail)
+                return False
+            return self._count_hit(record, source, canary.id, detail)
+
         if canary.quiet:
             return self._quiet_request(observation, detail)
 
@@ -450,21 +502,32 @@ class Engine:
                 "canary_unbound", source, {**detail, "reason": "unknown_id"}, rollup_key="unknown"
             )
             return False
-        issued_to, issued_at = issued
-        if issued_to != source:
-            # Counts for nobody: neither the reader of the page nor the requester.
-            self._sink.append(
-                "canary_relayed", source, {**detail, "issued_to": issued_to}, rollup_key=canary.id
-            )
-            return False
+        issued_to, issued_at, page_line = issued
         age = record.ts_ms - issued_at
         if age < 0 or age > self.config.id_ttl_ms:
             self._sink.append(
                 "canary_unbound", source, {**detail, "reason": "expired_id"}, rollup_key="expired"
             )
             return False
+        if issued_to != source:
+            detail.update(
+                issued_at_ms=issued_at,
+                expires_at_ms=issued_at + self.config.id_ttl_ms,
+                page_line=page_line,
+            )
+            self._relay(source, issued_to, detail)
+            return False
 
         return self._count_hit(record, source, canary.id, detail)
+
+    def _relay(self, source: str, issued_to: str, detail: dict) -> None:
+        """Report direct evidence of reuse. Neither source gains a counted hit."""
+        self._sink.append(
+            "canary_relayed",
+            source,
+            {**detail, "issued_to": issued_to, "reason": "issued_to_another_source"},
+            rollup_key=f"{issued_to}|{detail['canary']}",
+        )
 
     def _quiet_request(self, observation: Observation, detail: dict) -> bool:
         record = observation.record
@@ -502,7 +565,10 @@ class Engine:
         )
         if not counted:
             return False
-        self._hits[source] = (record.ts_ms, canary_id)
+        # Keep the v0.2 saved-state shape, including across rollbacks. Distinguish
+        # a v3 hit from the v2 placement for a later decision after restart.
+        saved_id = canary_id + "@v3" if detail["family"] == "v3-natural" else canary_id
+        self._hits[source] = (record.ts_ms, saved_id)
         self._hits.move_to_end(source)
         while len(self._hits) > self.config.max_hit_sources:
             self._hits.popitem(last=False)
@@ -593,12 +659,15 @@ class Engine:
         ttl = self._ttl(source, view.normal_browsing, now)
         expiry = now + ttl
         enforced = self._enforcing
+        canary_id = self._hits[source][1]
+        natural = canary_id.endswith("@v3")
+        canary_id = canary_id.removesuffix("@v3")
         detail = {
             **where,
             "signals": signals,
-            "canary": self._hits[source][1],
-            "canary_family": family_of(self._hits[source][1]),
-            "canary_signal": signal_of(self._hits[source][1]),
+            "canary": canary_id,
+            "canary_family": "v3-natural" if natural else family_of(canary_id),
+            "canary_signal": signal_of(canary_id),
             "ttl_ms": ttl,
             "expiry_ms": expiry,
             "normal_browsing": view.normal_browsing,
@@ -690,13 +759,42 @@ class Engine:
         }
 
     def _save(self, now: int, *, force: bool = False) -> None:
-        if self._state_path is None or not self._dirty:
+        if self._state_path is None:
+            return
+        receipts = self._issued_paths is not None and self._issued_paths.dirty
+        if not (self._dirty or receipts):
             return
         if not force and 0 <= now - self._last_save < _SAVE_INTERVAL_MS:
             return
-        write_private(self._state_path, json.dumps(self._snapshot(), sort_keys=True).encode())
-        self._dirty = False
+        if self._dirty:
+            write_private(self._state_path, json.dumps(self._snapshot(), sort_keys=True).encode())
+            self._dirty = False
+        if receipts:
+            # A separate file keeps engine.json in the v0.2 shape, so a rollback still reads it.
+            write_private(receipts_path(self._state_path), self._issued_paths.dumps(now))
+            self._issued_paths.dirty = False
         self._last_save = now
+
+    def _load_receipts(self) -> None:
+        path = receipts_path(self._state_path)
+        try:
+            with path.open("rb") as handle:
+                raw = handle.read(MAX_RECEIPTS_BYTES + 1)
+        except FileNotFoundError:
+            return
+        except OSError:
+            self._sink.append(
+                "engine_state_invalid", None, {"reason": "unreadable", "file": "receipts"}
+            )
+            return
+        try:
+            self._issued_paths.loads(raw, self._clock(), _checked_source)
+        except (ValueError, UnicodeDecodeError):
+            # Start without receipts: hits on earlier paths are then not bound,
+            # which only ever means fewer counted hits and fewer reported switches.
+            self._sink.append(
+                "engine_state_invalid", None, {"reason": "malformed", "file": "receipts"}
+            )
 
     def _load(self) -> None:
         try:

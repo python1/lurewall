@@ -42,6 +42,9 @@ CONFIG_FILES = {
     "etc/logrotate.d/lurewall": "operator/lurewall.logrotate",
 }
 ALLOWLIST = "etc/lurewall/allowlist"
+# Kept equal to lurewall.natural_runtime.NJS_PACKAGE / NJS_MINIMUM (checked by a test).
+NJS_PACKAGE = "libnginx-mod-http-js"
+NJS_MINIMUM = "0.8.2"
 
 
 class BuildError(ValueError):
@@ -131,6 +134,10 @@ def copy_operator_files(repository: Path, commit: str, root: Path) -> None:
             if config.get("dry_run") is not True or config["enforcement"]["adapter"] != "log-only":
                 raise BuildError("the package must ship observe-only enforcement defaults")
         write_file(root / target, content)
+    write_file(
+        root / DOC / "grafana/lurewall.json",
+        blob(repository, commit, "deploy/grafana/lurewall.json"),
+    )
     write_file(root / ALLOWLIST, "# One IP address or network per line.\n")
 
 
@@ -164,6 +171,9 @@ def stage(
         "Maintainer: Paul Charydczak <python1@users.noreply.github.com>\n"
         "Depends: python3 (>= 3.11), python3-cryptography (>= 40), nginx, nftables, logrotate,\n"
         " adduser, util-linux, init-system-helpers, systemd\n"
+        # Debian enables an installed nginx module for every vhost. Natural placements
+        # are opt-in, so the njs module is installed only when an operator chooses them.
+        f"Suggests: {NJS_PACKAGE} (>= {NJS_MINIMUM})\n"
         "Homepage: https://github.com/python1/lurewall\n"
         "Description: observe-only nginx canaries and signed event log\n"
         " Created by Paul Charydczak. Installs a systemd observer with optional enforcement.\n",

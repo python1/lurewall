@@ -17,6 +17,7 @@ import http.server
 import ipaddress
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -235,6 +236,15 @@ CASES: dict[int, Case] = {
             ),
             dry_run_only=True,
         ),
+        Case(
+            21,
+            "Possible address switch after a page is read elsewhere",
+            "scripted",
+            "test machine A (--part read), then test machine B (--part probe)",
+            "signed relay from A to B and two local fixture probes at B, without a counted "
+            "hit, block or would_block for B",
+            setup="dedicated lab site with a footer placement and the lab signals config",
+        ),
     )
 }
 
@@ -318,6 +328,43 @@ def _first_reference(ctx: Context) -> str | None:
         if refs:
             return refs[0]
     return None
+
+
+# Inert missing routes configured only in the lab signals fixture.
+SWITCH_PROBES = ("/lab-fixture/first-check", "/lab-fixture/second-check")
+
+
+def _switch_case(ctx: Context) -> dict:
+    if ctx.part == "read":
+        page = ctx.client.get("/")
+        if page.status != 200:
+            raise ValueError("the lab carrier did not return a page")
+        # Treat the page as data. Only display local path references from comments.
+        comments = re.findall(rb"<!--(.*?)-->", page.body, flags=re.DOTALL)
+        paths = [
+            path
+            for comment in comments
+            for path in labclient.same_site_paths(ctx.client.target, comment.strip())
+        ]
+        paths = list(dict.fromkeys(paths))
+        if not paths:
+            raise ValueError("no footer reference found on the lab page")
+        ctx.say("Transfer the issued footer reference privately to machine B:")
+        for path in paths:
+            ctx.say(path)
+        return {}
+    if ctx.part != "probe":
+        raise ValueError("case 21 takes --part read on A or --part probe on B")
+    issuer = source_address(ctx.ask("Source used for the read step on A: ").strip())
+    if issuer == ctx.source:
+        raise ValueError("use a different source for the probe step")
+    reference = ctx.reference or ctx.ask("Paste A's private footer reference: ").strip()
+    if not re.fullmatch(r"/(?!/)[a-zA-Z0-9._~/-]{1,512}", reference):
+        raise ValueError("expected one local natural path from the lab carrier")
+    ctx.client.get(reference)
+    for path in SWITCH_PROBES:
+        ctx.client.get(path)
+    return {"expected_issuer": issuer}
 
 
 def _scripted_attack(ctx: Context, *, probe_delay_s: float = 0.0) -> dict:
@@ -435,6 +482,8 @@ def run_case(case: Case, ctx: Context) -> dict:
             ctx.client.get(ctx.reference)
         else:
             raise ValueError("case 10 takes --part serve, or --part hit --reference REF")
+    elif n == 21:
+        result = _switch_case(ctx)
     elif n == 12:
         if ctx.part == "read":
             ref = _first_reference(ctx)

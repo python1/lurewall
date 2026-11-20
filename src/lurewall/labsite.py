@@ -216,6 +216,13 @@ def quiet_carriers(
     that serves one), A in robots.txt, C in security.txt. Error pages, the API
     page and the fetch-check page carry none.
     """
+    if canary_set.version == canary_mod.NATURAL_VERSION:
+        return {
+            "/": ("footer_comment.quiet",),
+            "/index.html": ("footer_comment.quiet",),
+            "/robots.txt": ("robots_disallow.quiet",),
+            SECURITY_TXT: ("security_txt.quiet",),
+        }
     present = {canary.id for canary in canary_set.canaries if canary.quiet}
     carriers: dict[str, tuple[str, ...]] = {}
     if "footer_comment.quiet" in present:

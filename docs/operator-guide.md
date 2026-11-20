@@ -88,6 +88,81 @@ keep the catch-all vhost deliberately configured and confirm the new exact
 hostname resolves to the intended server block. Review the generated config
 and keep the canary lookup, generated configuration and key out of Git.
 
+## Natural placements and the first report
+
+The earlier build command recreates the v0.2 lab fixture. For v0.3 use the
+public document root of a dedicated static vhost. Supply only content meant
+to be served. Route names and a local sitemap provide vocabulary and URL
+shapes. If the site is small, pass `--wordlist FILE` with locally chosen
+words. The build never downloads a sitemap. Use a fresh private staging
+directory outside the public root and outside Git.
+
+Natural placements need nginx's njs module, `libnginx-mod-http-js` 0.8.2 or
+newer. The Debian package only suggests it, so a default install does not add
+it. Debian enables an installed nginx module for every vhost and reloads nginx,
+so install it only when you choose natural placements. On Ubuntu it comes from
+the universe component. `lab-site build --site-root` and `doctor` refuse
+natural mode and name the fix if the module is missing or too old. With
+`PUBLIC_ROOT` and `VHOST` set for your site:
+
+```sh
+sudo apt install libnginx-mod-http-js
+sudo install -d -o lurewall -g lurewall -m 0700 /var/lib/lurewall/build-v3
+sudo -u lurewall lurewall lab-site build --site-root "$PUBLIC_ROOT" \
+  --server-name "$VHOST" --state /var/lib/lurewall/canaries.json \
+  --out /var/lib/lurewall/build-v3 --deploy-root /etc/lurewall/natural
+sudo install -d -m 0755 /etc/lurewall/natural/nginx
+sudo install -o root -g root -m 0600 /var/lib/lurewall/build-v3/nginx/* /etc/lurewall/natural/nginx/
+sudo install -d -o www-data -g www-data -m 0700 /etc/lurewall/natural/leases
+```
+
+The nginx master reads the private module and includes. Keep them root-owned.
+Only the leases directory needs nginx worker write access. In the nginx
+`http` context include `/etc/lurewall/natural/nginx/lurewall-natural-format.conf`.
+Use the generated `lurewall-site.conf` in place of the old dedicated server
+block, or incorporate its log directive and exact carrier locations in the
+dedicated vhost while retaining your error pages and access policy. Review
+location precedence, keep the access log exclusive to this vhost, run
+`sudo nginx -t`, reload nginx and restart `lurewall.service`. Do not put
+the generated JS module, access logs, state or lease files under the public root.
+
+Only the existing landing page receives a footer by default. To enable the
+other placements use `--placements footer,robots,security`. The builder
+preserves the resource's existing text and skips unavailable or unsupported
+carriers. Signed, malformed or expired security files stay untouched. Source
+windows are jittered from three to seven days. A conditional GET whose
+`If-None-Match` or `If-Modified-Since` matches gets a 304 with no body. A 304
+carries no path, so it is not logged as an issuance. The 200 that first
+delivered the path stays valid until its window ends. Check online cache
+bypass, ordinary 404 handling, and conditional GETs after deployment. Changed
+carrier files are served without injection until the next build.
+
+```sh
+sudo lurewall doctor
+sudo lurewall report --since 10m
+(umask 077 && sudo lurewall report --since 24h --html > report.html)
+sudo lurewall explain-decision "$SOURCE"
+```
+
+The signed report distinguishes qualifying bait, research hits and probes by
+configured rule. A quiet window may have no signed events. Check the access
+log and metrics freshness in `doctor`. A possible switch shows the issuer,
+requester and signed event reference. It does not affect either address's
+enforcement. There is no live dashboard service. Import the packaged
+`/usr/share/doc/lurewall/grafana/lurewall.json` or source install's
+`/opt/lurewall/current/grafana-dashboard.json` into Grafana and select the
+Prometheus source scraping the existing textfile metrics.
+
+**Limits.** Comparing carrier bodies from two IPs can reveal personalization.
+A pool rotating addresses on every request cannot be linked into a single
+agent. A third address reusing a copied path produces fan-out and ambiguous
+attribution. The detector saves issuance receipts in the private
+`/var/lib/lurewall/engine.json.receipts`, so they survive a restart. It keeps
+at most the 10,000 most recently issued live receipts, in at most 4 MiB. On a
+busier site, an older path issued before a restart is an ordinary 404 until
+that source loads the carrier again. These are observations about requests, not
+verified identities. See [privacy and retention](../SECURITY.md#address-correlation-and-retention).
+
 ## Verify and operate
 
 Load the dedicated site's ordinary landing page from an authorized client.
@@ -191,6 +266,32 @@ and remove the installation's reserved `inet lurewall` table if you need to
 clear its blocks immediately. Otherwise existing kernel entries expire on
 their own.
 
+The natural build adds a private `canaries.json.v3` sidecar. Keep the original
+`canaries.json`, engine and signals configs, engine state, signed evidence, and
+old vhost configuration.
+
+**Rolling back to v0.2.x after enabling natural placements: nginx first.**
+v0.2.x cannot parse the natural log format. If the package is rolled back
+while the natural vhost is still logging, v0.2.x records every request as a
+parse failure and detects nothing. `doctor` warns about this whenever natural
+placements are enabled. Package installs and upgrades print the same warning,
+and so does a downgrade below v0.3. Roll back in this order:
+
+1. Restore the previous vhost and log-format include, run `sudo nginx -t`
+   and reload nginx.
+2. Install the prior package.
+3. Restart `lurewall.service`, run `sudo lurewall doctor`, and confirm the
+   records counter advances.
+
+The v0.2 executable opens its original state and ignores the sidecar and the
+receipts file. After a rollback, any address that took natural bait in the
+last seven days is labelled `v1-imperative`/`ai` in later decisions. A
+robots-file placement would otherwise be `recon`. To return a v0.3 executable
+to legacy rendering,
+move the sidecar aside privately and restart the detector with the legacy
+vhost. Stage changes while observing and keep the previous generated files
+until the new deployment is qualified.
+
 For an upgrade, download and verify the newer release files as above and
 install the verified `.deb` with APT. Keep your operator configuration if
 prompted about a locally edited conffile. The signing key, checkpoints,
@@ -219,6 +320,13 @@ reserved nftables table, and immediately lifts active Lurewall blocks.
 Config, site content, key, state, checkpoints and logs remain for recovery or audit.
 Use APT's remove operation to retain package configuration files. A purge can
 delete those files.
+
+If nginx is missing or its configuration cannot be parsed, use
+`sudo lurewall uninstall --force` (also `sudo ./deploy/manage uninstall --force`
+from a trusted source checkout). Force permits an unavailable nginx inspection.
+A successful inspection finding an attached Lurewall configuration still stops
+removal. Firewall ownership and evidence retention checks remain in effect.
+Inspect retained includes before bringing nginx back online.
 
 On a disposable Debian/Ubuntu VM or a peer's authorized staging server:
 

@@ -1,6 +1,6 @@
 # Lurewall lab runbook
 
-How to install Lurewall in the lab container, run the twenty test cases and
+How to install Lurewall in the lab container, run the lab cases and
 export results that verify against the anchored checkpoints.
 
 Each block names the machine it runs on. Nothing here touches any
@@ -574,3 +574,21 @@ v1's twenty cases are done. A v2 lab round would follow
 As in the design doc, after the results are exported: on the lab host,
 `pct stop <CTID> && pct destroy <CTID> --purge` and remove `/etc/pve/firewall/<CTID>.fw`.
 On test machine A, `launchctl bootout gui/$(id -u)/org.lurewall.checkpoint-pull`.
+
+## Case 21 · Possible IP switch
+
+Use two distinct client source keys, a dedicated natural test vhost, an
+eligible footer and the lab signals fixture. Use a fresh observe-only lab
+with no previous counted hits for B. Both requests go to the same private
+lab target. On A run `lurewall lab case 21 --from machine-a --part read`.
+Transfer the footer reference privately. On B run
+`lurewall lab case 21 --from machine-b --part probe` and enter A's source
+and the reference at the prompts. Set `--target` on both invocations to the
+lab's actual private origin. The harness requests two inert paths that are
+configured as distinct signals only in the lab.
+
+Collect the ledgers and verified event log as for the other cases. The probe
+half passes only when the signed relay has A as issuer and B as requester,
+both fixture probes appear for B, and B has no counted hit, would-block or
+block. Inspect either endpoint with `explain-decision` and the time window
+with `report`. Do not publish the reference, addresses or private ledgers.

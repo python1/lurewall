@@ -9,3 +9,12 @@ if [ "${1-}" = remove ]; then
     fi
     exec /usr/lib/lurewall/debian-lifecycle remove
 fi
+
+# dpkg runs the outgoing package's prerm as "upgrade NEW-VERSION", also on a downgrade.
+if [ "${1-}" = upgrade ] && [ -e /var/lib/lurewall/canaries.json.v3 ] &&
+    dpkg --compare-versions "${2-0}" lt 0.3~; then
+    echo "lurewall: WARNING: downgrading below v0.3 while natural placements are enabled." >&2
+    echo "lurewall: v0.2.x cannot parse natural log lines and would record every request" >&2
+    echo "lurewall: as a parse failure. Restore the previous vhost and log-format include," >&2
+    echo "lurewall: run nginx -t and reload nginx, then restart lurewall.service." >&2
+fi

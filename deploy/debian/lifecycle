@@ -27,6 +27,11 @@ SERVICES = (
 )
 MANAGED_LOG = Path("/var/log/lurewall/access.jsonl")
 DETACH_NGINX = "Detach the Lurewall nginx configuration, run nginx -t, and reload nginx."
+NATURAL_ROLLBACK = (
+    "lurewall: natural placements are enabled. Before installing v0.2.x, restore the previous "
+    "vhost and log-format include, run nginx -t and reload nginx. v0.2.x cannot parse natural "
+    "log lines and would record every request as a parse failure. Run lurewall doctor."
+)
 
 
 class LifecycleError(RuntimeError):
@@ -256,6 +261,8 @@ class Lifecycle:
             action = "start" if installed is None else "restart"
             self.call("/usr/bin/deb-systemd-invoke", action, MAIN)
         self.save_install(reservation)
+        if present(self.state / "canaries.json.v3"):
+            print(NATURAL_ROLLBACK, file=sys.stderr)
         if reservation == "offline":
             print(
                 "lurewall: offline install. Run dpkg-reconfigure lurewall on the running host "
@@ -263,7 +270,7 @@ class Lifecycle:
                 file=sys.stderr,
             )
 
-    def require_nginx_detached(self):
+    def require_nginx_detached(self, *, force=False):
         # nginx may dump sensitive configuration. Capture it without echoing it.
         try:
             result = self.runner(["/usr/sbin/nginx", "-T"])
@@ -277,7 +284,7 @@ class Lifecycle:
             real_access = self.access.resolve()
             expect_path = False
             for word in tokens:
-                if word == "lurewall_operator" or (
+                if word in {"lurewall_operator", "lurewall_natural"} or (
                     expect_path
                     and word.startswith("/")
                     and (self.root / word.lstrip("/")).resolve() == real_access
@@ -285,6 +292,13 @@ class Lifecycle:
                     raise LifecycleError(f"nginx still references Lurewall. {DETACH_NGINX}")
                 expect_path = word == "access_log"
         except (OSError, subprocess.SubprocessError, ValueError):
+            if force:
+                print(
+                    "nginx inspection unavailable. Review retained vhost and log-format "
+                    "includes before starting nginx again.",
+                    file=sys.stderr,
+                )
+                return
             raise LifecycleError(f"Could not verify nginx is detached. {DETACH_NGINX}") from None
 
     def active(self, unit):
@@ -293,8 +307,8 @@ class Lifecycle:
             raise LifecycleError(f"could not determine whether {unit} is running")
         return status.returncode == 0
 
-    def remove(self):
-        self.require_nginx_detached()
+    def remove(self, *, force=False):
+        self.require_nginx_detached(force=force)
         installed = self.installed()
         table = self.table_exists()
         if table and installed != "live":
@@ -333,7 +347,7 @@ def main():
         if args[0] == "configure":
             lifecycle.configure()
         else:
-            lifecycle.remove()
+            lifecycle.remove(force=os.environ.get("LUREWALL_UNINSTALL_FORCE") == "1")
     except (LifecycleError, OSError, KeyError, ValueError, subprocess.SubprocessError) as exc:
         print(f"lurewall package: {exc}", file=sys.stderr)
         return 1

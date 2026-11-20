@@ -83,6 +83,15 @@ def test_fresh_configuration_initializes_private_state_without_enforcement(tmp_p
     assert all(call[1:4] == ("-u", "lurewall", "--") for call in host.calls if "keygen" in call)
 
 
+def test_configuration_warns_about_rollback_only_once_natural_mode_is_built(tmp_path, capsys):
+    lifecycle, _host = target(tmp_path)
+    lifecycle.configure()
+    assert "natural placements are enabled" not in capsys.readouterr().err
+    (lifecycle.state / "canaries.json.v3").write_text("private fixture\n")
+    lifecycle.configure()
+    assert "restore the previous vhost" in capsys.readouterr().err
+
+
 def test_offline_configuration_queues_only_observer_for_boot(tmp_path):
     lifecycle, host = target(tmp_path, live=False)
     host.kernel = False
@@ -139,13 +148,14 @@ def test_refuses_fresh_install_that_would_inherit_enforcement_or_own_another_tab
         "access_log /var/log/lurewall/access.jsonl;",
     ],
 )
-def test_removal_refuses_when_nginx_still_references_lurewall(tmp_path, directive):
+@pytest.mark.parametrize("force", [False, True])
+def test_removal_refuses_when_nginx_still_references_lurewall(tmp_path, directive, force):
     lifecycle, host = target(tmp_path)
     lifecycle.configure()
     host.nginx += f"\n{directive}"
     host.calls.clear()
     with pytest.raises(LifecycleError, match="reload nginx"):
-        lifecycle.remove()
+        lifecycle.remove(force=force)
     assert host.calls == [("/usr/sbin/nginx", "-T")]
     assert lifecycle.marker.is_file()
 
@@ -184,3 +194,23 @@ def test_removal_refuses_unverified_table_and_when_policy_denies_stopping(tmp_pa
         lifecycle.remove()
     assert host.table
     assert lifecycle.marker.read_text() == "live\n"
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_forced_removal_with_broken_or_missing_nginx_preserves_evidence(tmp_path, missing):
+    lifecycle, host = target(tmp_path)
+    lifecycle.configure()
+    host.nginx = "invalid"
+
+    def invoke(argv):
+        if missing and argv[0].endswith("/nginx"):
+            raise FileNotFoundError
+        return host(argv)
+
+    lifecycle.runner = invoke
+    with pytest.raises(LifecycleError, match="Could not verify"):
+        lifecycle.remove()
+    evidence = lifecycle.state / "events.log"
+    evidence.write_bytes(b"evidence")
+    lifecycle.remove(force=True)
+    assert evidence.read_bytes() == b"evidence" and not lifecycle.marker.exists()

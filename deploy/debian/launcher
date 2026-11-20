@@ -10,6 +10,15 @@ raise SystemExit(main())'
 
 if [ "$(/usr/bin/id -u)" = 0 ]; then
     case "${1-}/${2-}" in
+        uninstall/)
+            [ "$#" = 1 ] || exit 2
+            exec /usr/bin/dpkg --remove lurewall
+            ;;
+        uninstall/--force)
+            [ "$#" = 2 ] || exit 2
+            export LUREWALL_UNINSTALL_FORCE=1
+            exec /usr/bin/dpkg --remove lurewall
+            ;;
         allowlist/list|allowlist/add|allowlist/remove)
             exec /usr/bin/python3 -I -S -c "$invoke" "$@"
             ;;

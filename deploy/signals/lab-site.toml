@@ -29,6 +29,8 @@ asset_extensions = ["css", "js", "png", "jpg", "svg", "ico", "woff2"]
 
 # The path equals the rule.
 exact = [
+    "/lab-fixture/first-check",
+    "/lab-fixture/second-check",
     "/wp-login.php",
     "/xmlrpc.php",
     "/wp-config.php",
