@@ -71,6 +71,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--deploy-root",
         help="where the output will live on the web server, if not the output directory",
     )
+    build.add_argument("--site-root", type=Path, help="public static root for natural placements")
+    build.add_argument("--wordlist", type=Path, help="local site vocabulary for natural placements")
+    build.add_argument(
+        "--placements", default="footer", help="comma-separated footer,robots,security"
+    )
     build.add_argument("--listen", default="80", help="nginx listen value (default: 80)")
     build.add_argument("--server-name", help="exact hostname for an operator-managed virtual host")
     build.add_argument(
@@ -183,15 +188,25 @@ def _build_parser() -> argparse.ArgumentParser:
     unblock.add_argument("address", help="a single IPv4 or IPv6 address")
     unblock.add_argument("--operator-dir", type=Path, default=STATE_DIR / "operator")
 
+    report = commands.add_parser("report", help="summarize a window of verified signed history")
+    report.add_argument("--since", default="24h", help="look back 10m, 24h (default), 7d, etc.")
+    report.add_argument("--html", action="store_true", help="write standalone HTML to stdout")
+    report.add_argument("--signals", type=Path, help="site config for displaying probe rule labels")
     explain = commands.add_parser("explain-decision", help="show verified decisions for an address")
+    for command in (report, explain):
+        command.add_argument("--event-log", type=Path, default=STATE_DIR / "events.log")
+        command.add_argument(
+            "--pubkey", help="published public key or file (defaults to local signing identity)"
+        )
+        command.add_argument("--key", type=Path, default=STATE_DIR / "keys/lurewall.key")
+        command.add_argument("--anchors", type=Path, action="append", default=[])
     explain.add_argument("address", help="a single IPv4 or IPv6 address")
-    explain.add_argument("--event-log", type=Path, default=STATE_DIR / "events.log")
-    explain.add_argument(
-        "--pubkey", help="published public key or file (defaults to local signing identity)"
-    )
-    explain.add_argument("--key", type=Path, default=STATE_DIR / "keys/lurewall.key")
-    explain.add_argument("--anchors", type=Path, action="append", default=[])
     explain.add_argument("--limit", type=int, default=30, help="maximum entries to show")
+
+    uninstall = commands.add_parser("uninstall", help="remove an installed Lurewall deployment")
+    uninstall.add_argument(
+        "--force", action="store_true", help="allow removal if nginx is unavailable"
+    )
 
     notify = commands.add_parser("notify", help="deliver queued local service alerts")
     notify.add_argument("--telemetry-dir", type=Path, required=True)
@@ -205,7 +220,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="run one test case from this machine and record the run in the ledger",
         description="Plain GET requests to the lab target only. Refuses any public address.",
     )
-    case.add_argument("number", type=int, help="the case number (1-20)")
+    case.add_argument("number", type=int, help="the case number (1-21)")
     case.add_argument(
         "--from",
         dest="source",
@@ -215,7 +230,7 @@ def _build_parser() -> argparse.ArgumentParser:
     case.add_argument("--target", default="http://192.0.2.160", help="the lab site")
     case.add_argument("--ledger", type=Path, help="the run ledger (default ~/lurewall-lab)")
     case.add_argument("--label", default="", help="agent, model and version, for agent cases")
-    case.add_argument("--part", default="", help="cases 10 and 12: which half of the case")
+    case.add_argument("--part", default="", help="cases 10, 12 and 21: which half of the case")
     case.add_argument("--reference", default="", help="case 10: the reference to request")
     case.add_argument("--scripted", action="store_true", help="case 2: scripted rehearsal")
     case.add_argument("--watch", action="store_true", help="case 13: time the block")
@@ -422,6 +437,24 @@ def _canary_command(args: argparse.Namespace) -> int:
     name = f"lurewall {args.command}"
     try:
         if args.command == "lab-site":
+            if args.site_root is not None:
+                from lurewall import naturalsite
+
+                conf = naturalsite.build(
+                    state=args.state,
+                    site_root=args.site_root,
+                    out=args.out,
+                    host=args.server_name,
+                    listen=args.listen,
+                    wordlist=args.wordlist,
+                    placements=args.placements,
+                    deploy_root=args.deploy_root,
+                    checkpoint=args.checkpoint_file,
+                )
+                print(f"Natural carrier configuration written to {conf}")
+                return EXIT_OK
+            if args.wordlist is not None or args.placements != "footer":
+                raise labsite.BuildError("supply --site-root to build natural placements")
             if args.state.exists():
                 canary_set = canaries.load_state(args.state)
                 if not canary_set.has_quiet:
@@ -696,6 +729,23 @@ def _operator_command(args: argparse.Namespace) -> int:
             anchors = args.anchors or (
                 [CHECKPOINT] if args.event_log == STATE_DIR / "events.log" else []
             )
+            if args.command == "report":
+                from time import time_ns
+
+                from lurewall import reporting, sigconfig
+
+                end = time_ns() // 1_000_000
+                start = max(0, end - reporting.window_ms(args.since))
+                config = None
+                if args.signals or SIGNALS_CONFIG.is_file():
+                    config = sigconfig.load(args.signals or SIGNALS_CONFIG)
+                summary = reporting.Summary(start, end, reporting.probe_rules(config))
+                verified = verify.verify_log(args.event_log, key, anchors, visit=summary.visit)
+                if not verified.ok:
+                    print(verify.format_report(verified), file=sys.stderr)
+                    return EXIT_FAIL
+                print(reporting.render(summary, verified, as_html=args.html))
+                return EXIT_OK
             report, source, count, history = operator.explain(
                 args.address, args.event_log, key, anchors, args.limit
             )
@@ -730,8 +780,15 @@ def main(argv: list[str] | None = None) -> int:
         return _engine_command(args)
     if args.command == "allowlist":
         return _allowlist_command(args)
-    if args.command in ("doctor", "unblock", "explain-decision"):
+    if args.command in ("doctor", "unblock", "explain-decision", "report"):
         return _operator_command(args)
+    if args.command == "uninstall":
+        print(
+            "Use the installed lurewall launcher as root, or the trusted source checkout's "
+            "deploy/manage uninstall for a source installation.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     if args.command == "notify":
         from lurewall.observability import notify
 

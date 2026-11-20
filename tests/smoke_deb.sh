@@ -168,7 +168,14 @@ if [[ $mode == systemd ]]; then
     systemctl is-active --quiet lurewall.service
     detach_nginx
 fi
-apt-get remove -y lurewall
+if [[ $mode == container ]]; then
+    # Disposable image, no nginx daemon. Exercise the root launcher and prerm together.
+    printf 'invalid_fixture_directive;\n' > "$nginx_fixture"
+    /usr/bin/lurewall uninstall --force
+    rm -- "$nginx_fixture"
+else
+    apt-get remove -y lurewall
+fi
 [[ ! -e /usr/bin/lurewall ]]
 [[ -s $key && -s $checkpoint ]]
 if [[ $mode == systemd ]] && systemctl is-active --quiet lurewall.service; then

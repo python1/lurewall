@@ -234,7 +234,7 @@ def consume_unblock(path: Path, engine) -> bool:
 def explain(
     address: str, log: Path, public_key: str, anchors: list[Path], limit: int
 ) -> tuple[verify.Report, str, int, deque[dict]]:
-    from lurewall import verify
+    from lurewall import reporting, verify
 
     source = _address_source(address)
     if not 1 <= limit <= MAX_DECISIONS:
@@ -244,18 +244,28 @@ def explain(
 
     def visit(item: Entry) -> None:
         nonlocal matched
-        if item.source != source:
+        switch = reporting.possible_switch(item)
+        if item.source != source and (switch is None or switch.issuer != source):
             return
         kind = item.detail.get("of") if item.type == "rollup" else item.type
         if not isinstance(kind, str) or kind not in _DECISION_EVENTS:
             return
         matched += 1
+        details = {key: value for key, value in item.detail.items() if key in _DETAIL_KEYS}
+        if switch is not None:
+            # Relay details use a separate, strictly typed projection on both endpoints.
+            details = {
+                "issued_to": switch.issuer,
+                "requested_by": switch.requester,
+                "observation": switch.description(),
+                "enforcement_effect": "none",
+            }
         history.append(
             {
                 "seq": item.seq,
                 "ts_ms": item.ts,
                 "type": item.type,
-                "detail": {key: value for key, value in item.detail.items() if key in _DETAIL_KEYS},
+                "detail": details,
             }
         )
 

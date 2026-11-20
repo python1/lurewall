@@ -18,6 +18,25 @@ Created by Paul Charydczak.
 Case study: [docs/case-study.md](docs/case-study.md). Full lab findings:
 [docs/lab-findings.md](docs/lab-findings.md).
 
+## v0.3.0 operator workflow
+
+Created by Paul Charydczak.
+
+Build natural references from a local public site root and its sitemap or a
+private operator wordlist. The default placement is a footer comment. An
+existing robots.txt rule group can carry an optional recon reference that
+counts under the same-source rules. An existing eligible security.txt can
+carry an optional research-only reference. Ordinary missing paths and
+references use the same vhost error handler.
+
+After a visit, run `sudo lurewall doctor` and `sudo lurewall report --since 10m`.
+The report and `explain-decision` can show **possible IP switch** when a second
+source uses a path issued to the first. This is a signed observation and has
+zero effect on either source's would-block or firewall state. Configure the
+vhost, import the Grafana dashboard, or export script-free HTML using the
+[operator guide](docs/operator-guide.md#natural-placements-and-the-first-report).
+The historical lab results below refer to the version tested at the time.
+
 ## Lab results
 
 Twenty test cases were run in November 2026 against a throwaway site in an
@@ -443,10 +462,10 @@ them (`content_reader_cross_site_probes_not_counted`).
 ## The lab harness
 
 The lab runbook is [docs/lab-runbook.md](docs/lab-runbook.md). It covers
-install in the lab container, the twenty test cases and the results export.
+install in the lab container, the lab cases and the results export.
 
 ```sh
-lurewall lab list                                   # the twenty cases
+lurewall lab list                                   # all available cases
 lurewall lab case 3 --from machine-b                # run one, record it in the ledger
 lurewall checkpoint pull --pubkey KEY --repo DIR    # test machine A job: fetch, check, commit
 lurewall lab results --log LOG --pubkey KEY --anchors DIR --ledger L --out OUT

@@ -139,13 +139,14 @@ def test_refuses_fresh_install_that_would_inherit_enforcement_or_own_another_tab
         "access_log /var/log/lurewall/access.jsonl;",
     ],
 )
-def test_removal_refuses_when_nginx_still_references_lurewall(tmp_path, directive):
+@pytest.mark.parametrize("force", [False, True])
+def test_removal_refuses_when_nginx_still_references_lurewall(tmp_path, directive, force):
     lifecycle, host = target(tmp_path)
     lifecycle.configure()
     host.nginx += f"\n{directive}"
     host.calls.clear()
     with pytest.raises(LifecycleError, match="reload nginx"):
-        lifecycle.remove()
+        lifecycle.remove(force=force)
     assert host.calls == [("/usr/sbin/nginx", "-T")]
     assert lifecycle.marker.is_file()
 
@@ -184,3 +185,23 @@ def test_removal_refuses_unverified_table_and_when_policy_denies_stopping(tmp_pa
         lifecycle.remove()
     assert host.table
     assert lifecycle.marker.read_text() == "live\n"
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_forced_removal_with_broken_or_missing_nginx_preserves_evidence(tmp_path, missing):
+    lifecycle, host = target(tmp_path)
+    lifecycle.configure()
+    host.nginx = "invalid"
+
+    def invoke(argv):
+        if missing and argv[0].endswith("/nginx"):
+            raise FileNotFoundError
+        return host(argv)
+
+    lifecycle.runner = invoke
+    with pytest.raises(LifecycleError, match="Could not verify"):
+        lifecycle.remove()
+    evidence = lifecycle.state / "events.log"
+    evidence.write_bytes(b"evidence")
+    lifecycle.remove(force=True)
+    assert evidence.read_bytes() == b"evidence" and not lifecycle.marker.exists()

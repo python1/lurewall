@@ -28,6 +28,7 @@ from lurewall.logreader import LogReader
 from lurewall.nft import NftAdapter, NftError, Runner, system_runner
 from lurewall.observability import Telemetry
 from lurewall.operator import consume_unblock, read_allowlist, validate_control_dir
+from lurewall.pathbindings import IssuedPaths
 from lurewall.signals import Classifier
 
 
@@ -98,7 +99,10 @@ class Service:
             raise engineconfig.EngineConfigError(
                 "operator enforcement requires explicit enforcement.tcp_ports"
             )
-        canary_set = canaries.load_state(paths.canaries)
+        natural_state = canaries.natural_state_path(paths.canaries)
+        canary_set = canaries.load_state(
+            natural_state if natural_state.exists() else paths.canaries
+        )
         routes = labsite.site_routes()
         # A decoy that collides with a real route is disabled, not served as a
         # trap: a real page must never count as a canary hit.
@@ -109,11 +113,13 @@ class Service:
             canary_set = replace(
                 canary_set, canaries=tuple(c for c in canary_set.canaries if c.id not in disabled)
             )
+        issued_paths = IssuedPaths(config.max_issued_ids) if canary_set.version == 3 else None
         classifier = Classifier(
             sigconfig.load(paths.signals),
             canary_set,
             routes,
             labsite.quiet_carriers(canary_set),
+            issued_paths=issued_paths,
         )
         signer = signing.EurekaSigner.load(paths.key)
 
@@ -132,6 +138,7 @@ class Service:
                 self.collector.tracker,
                 adapter=self.adapter,
                 state_path=paths.engine_state,
+                issued_paths=issued_paths,
                 clock=clock,
                 alert=alert,
             )

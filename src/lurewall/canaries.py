@@ -61,6 +61,7 @@ from urllib.parse import unquote_to_bytes
 from lurewall import wordbank as bank
 
 STATE_VERSION = 1
+NATURAL_VERSION = 3
 
 INSTRUCTION = "instruction"
 BAIT = "bait"
@@ -432,6 +433,17 @@ def validate(canary_set: CanarySet) -> None:
     Everything in the set is later written into HTML and an nginx config, so
     each field is held to a narrow character set here, whoever wrote the file.
     """
+    if canary_set.version == NATURAL_VERSION:
+        if (
+            not _PLACEHOLDER_RE.fullmatch(canary_set.placeholder)
+            or canary_set.canaries
+            or canary_set.header_name
+            or canary_set.hidden_class
+            or type(canary_set.created_ms) is not int
+            or canary_set.created_ms < 0
+        ):
+            raise CanaryError("invalid natural issuance state")
+        return
     if canary_set.version != STATE_VERSION:
         raise CanaryError("unsupported canary state version")
     if type(canary_set.created_ms) is not int or canary_set.created_ms < 0:
@@ -461,6 +473,34 @@ def validate(canary_set: CanarySet) -> None:
 
 
 # -- generation ----------------------------------------------------------------------
+
+
+def natural_state_path(legacy: Path) -> Path:
+    return legacy.with_name(legacy.name + ".v3")
+
+
+def natural_state() -> CanarySet:
+    """Private installation key; natural references only exist when an origin serves them."""
+    return CanarySet(
+        NATURAL_VERSION, time.time_ns() // 1_000_000, secrets.token_hex(16), "", "", ()
+    )
+
+
+def is_natural_path(path: str) -> bool:
+    return (
+        isinstance(path, str)
+        and len(path) <= 220
+        and re.fullmatch(r"(?:/[a-z0-9][a-z0-9._-]{0,63}){1,6}/?", path) is not None
+        and ".." not in path
+        and not any(s in RESERVED_SEGMENTS for s in path.lower().split("/"))
+    )
+
+
+def natural_canary(placement_id: str, path: str) -> Canary:
+    if placement_id not in QUIET_PLACEMENTS or not is_natural_path(path):
+        raise CanaryError("invalid natural issuance")
+    placement, lure = QUIET_PLACEMENTS[placement_id]
+    return Canary(placement_id, placement, lure, path, "", "{ref}", "plain", "", "")
 
 
 def _date(rng: Any) -> str:

@@ -727,7 +727,9 @@ def test_issued_id_indexes_agree_after_a_source_replaces_its_own_evicted_id():
     indexed = {
         request_id: source for source, ids in rig.engine._issued_by.items() for request_id in ids
     }
-    assert indexed == {request_id: source for request_id, (source, _) in rig.engine._issued.items()}
+    assert indexed == {
+        request_id: source for request_id, (source, _, _) in rig.engine._issued.items()
+    }
     assert set(indexed) == {other, latest}
 
 

@@ -40,7 +40,7 @@ PYTHON_SETUP = (
 )
 RUN_CLI = "from lurewall.cli import main; raise SystemExit(main())"
 MANAGED = "lurewall-operator-v1\n"
-OPERATOR_LOG_FORMAT = "lurewall_operator"
+OPERATOR_LOG_FORMATS = {"lurewall_operator", "lurewall_natural"}
 NGINX_DETACH = (
     "Remove the Lurewall access_log directive and its log-format include, "
     "then run nginx -t and reload nginx before retrying uninstall."
@@ -394,6 +394,9 @@ class Deployment:
             'if [ "$uid" = 0 ]; then\n'
             '    case "${1-}/${2-}" in\n'
             f'        allowlist/list|allowlist/add|allowlist/remove) exec {trusted} "$@" ;;\n'
+            '        uninstall/|uninstall/--force) [ "$#" -le 2 ] || exit 2; '
+            "exec /usr/bin/python3 -I -S "
+            f'{shlex.quote(str(release / "bin/manage"))} "$@" ;;\n'
             "    esac\n"
             f"    exec /usr/sbin/runuser -u {ACCOUNT} -- /usr/bin/env -i {RUNTIME_PATH} "
             f'LANG=C.UTF-8 HOME=/var/lib/lurewall {unprivileged} "$@"\n'
@@ -402,6 +405,7 @@ class Deployment:
         )
         bindir = release / "bin"
         copied_directory(bindir)
+        atomic_write(bindir / "manage", (self.source / "deploy/manage").read_bytes(), mode=0o755)
         atomic_write(bindir / "lurewall", launcher.encode("utf-8"), mode=0o755)
 
     def build(self, wheelhouse):
@@ -412,6 +416,10 @@ class Deployment:
                 scratch = Path(temporary)
                 scratch.chmod(0o711)
                 self.build_packages(scratch, release, wheelhouse)
+            atomic_write(
+                release / "grafana-dashboard.json",
+                (self.source / "deploy/grafana/lurewall.json").read_bytes(),
+            )
             self.write_launcher(release)
         except BaseException:
             shutil.rmtree(release)
@@ -670,7 +678,7 @@ class Deployment:
         if self.has_firewall():
             self.run(["/usr/sbin/nft", "delete", "table", "inet", "lurewall"])
 
-    def require_nginx_detached(self):
+    def require_nginx_detached(self, *, force=False):
         # A full effective config can contain credentials and generated decoy values.
         # Keep its output in memory and report only a fixed diagnostic.
         try:
@@ -686,7 +694,7 @@ class Deployment:
             real_access = self.access.resolve()
             after_access_log = False
             for word in lexer:
-                if word == OPERATOR_LOG_FORMAT or (
+                if word in OPERATOR_LOG_FORMATS or (
                     word.startswith("/") and Path(os.path.normpath(word)) == access
                 ):
                     raise DeploymentError(f"nginx still references Lurewall. {NGINX_DETACH}")
@@ -701,13 +709,20 @@ class Deployment:
         except DeploymentError:
             raise
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            if force:
+                print(
+                    "nginx inspection unavailable. Review the retained vhost and log-format "
+                    "includes before starting nginx again.",
+                    file=sys.stderr,
+                )
+                return
             raise DeploymentError(
                 f"Could not verify that nginx is detached. {NGINX_DETACH}"
             ) from None
 
-    def uninstall(self):
+    def uninstall(self, *, force=False):
         self.check_destination("uninstall")
-        self.require_nginx_detached()
+        self.require_nginx_detached(force=force)
         enabled_units = [name for name in (MAIN, *TIMERS) if (self.systemd / name).is_file()]
         if enabled_units:
             self.systemctl("disable", "--now", *enabled_units)
@@ -734,7 +749,12 @@ def main():
     parser.add_argument(
         "--wheelhouse", type=Path, help="install Python dependencies from local wheels only"
     )
+    parser.add_argument(
+        "--force", action="store_true", help="uninstall if nginx cannot be inspected"
+    )
     args = parser.parse_args()
+    if args.force and args.action != "uninstall":
+        parser.error("--force applies only to uninstall")
     if sys.platform != "linux" or os.geteuid() != 0:
         parser.error("run as root on Debian or Ubuntu with systemd")
     if sys.version_info < (3, 11):  # noqa: UP036 - called by the system Python
@@ -759,7 +779,7 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             deployment = Deployment(SOURCE)
             if args.action == "uninstall":
-                deployment.uninstall()
+                deployment.uninstall(force=args.force)
             else:
                 deployment.deploy(args.action, args.wheelhouse and args.wheelhouse.resolve())
     except (DeploymentError, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:

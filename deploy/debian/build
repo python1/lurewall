@@ -131,6 +131,10 @@ def copy_operator_files(repository: Path, commit: str, root: Path) -> None:
             if config.get("dry_run") is not True or config["enforcement"]["adapter"] != "log-only":
                 raise BuildError("the package must ship observe-only enforcement defaults")
         write_file(root / target, content)
+    write_file(
+        root / DOC / "grafana/lurewall.json",
+        blob(repository, commit, "deploy/grafana/lurewall.json"),
+    )
     write_file(root / ALLOWLIST, "# One IP address or network per line.\n")
 
 
@@ -162,8 +166,8 @@ def stage(
         "Priority: optional\n"
         "Architecture: all\n"
         "Maintainer: Paul Charydczak <python1@users.noreply.github.com>\n"
-        "Depends: python3 (>= 3.11), python3-cryptography (>= 40), nginx, nftables, logrotate,\n"
-        " adduser, util-linux, init-system-helpers, systemd\n"
+        "Depends: python3 (>= 3.11), python3-cryptography (>= 40), nginx, libnginx-mod-http-js,\n"
+        " nftables, logrotate, adduser, util-linux, init-system-helpers, systemd\n"
         "Homepage: https://github.com/python1/lurewall\n"
         "Description: observe-only nginx canaries and signed event log\n"
         " Created by Paul Charydczak. Installs a systemd observer with optional enforcement.\n",

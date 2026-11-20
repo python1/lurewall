@@ -38,6 +38,8 @@ FIELDS = (
 _FIELD_SET = frozenset(FIELDS)
 OPERATOR_FIELDS = (*FIELDS, "forwarded_for")
 _OPERATOR_FIELD_SET = frozenset(OPERATOR_FIELDS)
+ISSUANCE_FIELDS = ("lw_placement", "lw_path", "lw_until", "lw_source")
+_NATURAL_OPERATOR_FIELDS = _OPERATOR_FIELD_SET.union(ISSUANCE_FIELDS)
 _MAX_FORWARDED_LENGTH = 4096
 _MAX_FORWARDED_HOPS = 32
 
@@ -69,6 +71,11 @@ class Record:
     line_sha256: str
     invalid_utf8: bool  # bytes were replaced with U+FFFD while decoding
     stale: bool  # too old (or too far in the future) to enforce on
+    # Origin-generated, private log fields. None means a v0.2 log format.
+    lw_placement: str | None = None
+    lw_path: str | None = None
+    lw_until: str | None = None
+    lw_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -163,8 +170,9 @@ def parse_line(
         return failure("not_json")
     if type(obj) is not dict:
         return failure("not_an_object")
-    operator_format = obj.keys() == _OPERATOR_FIELD_SET
-    if not operator_format and obj.keys() != _FIELD_SET:
+    fields = obj.keys()
+    operator_format = fields in (_OPERATOR_FIELD_SET, _NATURAL_OPERATOR_FIELDS)
+    if not operator_format and fields != _FIELD_SET:
         return failure("unexpected_fields")
     if not operator_format and (require_peer_log or trusted_proxies):
         return failure("peer_log_required")
@@ -203,4 +211,8 @@ def parse_line(
         # Old events are logged, never enforced. A time far in the future is
         # just as untrustworthy, so it gets the same treatment.
         stale=abs(now_ms - ts_ms) > max_age_ms,
+        lw_placement=obj.get("lw_placement"),
+        lw_path=obj.get("lw_path"),
+        lw_until=obj.get("lw_until"),
+        lw_source=_normalize_ip(obj["lw_source"]) if "lw_source" in obj else None,
     )

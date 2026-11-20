@@ -168,8 +168,8 @@ def test_a_chunked_response_is_read():
 # -- the cases ---------------------------------------------------------------------------
 
 
-def test_there_are_twenty_cases_and_only_case_20_is_dry_run_only():
-    assert sorted(labcases.CASES) == list(range(1, 21))
+def test_there_are_twenty_one_cases_and_only_case_20_is_dry_run_only():
+    assert sorted(labcases.CASES) == list(range(1, 22))
     assert [n for n, case in labcases.CASES.items() if case.dry_run_only] == [20]
     careful = labcases.CASES[20]
     assert "careful AI agent" in careful.title and "Ask every time" in careful.title
@@ -784,7 +784,7 @@ def test_pulled_checkpoints_are_anchors_verify_reads(tmp_path, key):
 def test_lab_list_names_every_case(capsys):
     assert cli.main(["lab", "list"]) == cli.EXIT_OK
     out = capsys.readouterr().out
-    assert len(out.splitlines()) == 20 and "[dry-run only]" in out
+    assert len(out.splitlines()) == 21 and "[dry-run only]" in out
 
 
 def test_lab_case_refuses_a_public_target(capsys, tmp_path):
@@ -947,3 +947,39 @@ def test_results_report_hits_per_family_and_signal_and_per_agent(tmp_path, key):
     markdown = (tmp_path / "out" / "results.md").read_text()
     assert "| v2\\-quiet | recon | 1 |" in markdown and "| v1\\-imperative | ai | 1 |" in markdown
     assert "never counted" in markdown
+
+
+def test_case_21_two_sources_use_inert_probes_and_keep_reference_out_of_ledger():
+    private = "/fixture-only/invented"
+    site = FakeSite({"/": f"<!-- {private} -->".encode()})
+    shown = []
+    first = labcases.run_case(labcases.CASES[21], context(site, part="read", say=shown.append))
+    assert private in shown and private not in json.dumps(first)
+    prompts = iter(["machine-a", private])
+    second = labcases.run_case(
+        labcases.CASES[21], context(site, part="probe", ask=lambda _msg: next(prompts))
+    )
+    assert site.paths() == ["/", private, *labcases.SWITCH_PROBES]
+    assert private not in json.dumps(second)
+    assert second["expected_issuer"] == labcases.source_address("machine-a")
+
+
+def test_case_21_requires_the_expected_signed_relay_and_both_lab_probes(tmp_path, key):
+    first, second = (labcases.source_address(name) for name in ("machine-a", "machine-b"))
+    events = [
+        (T0, "canary_relayed", second, {"issued_to": first}),
+        *(
+            (T0 + n, "attack_signal", second, {"signal": "path:" + path})
+            for n, path in enumerate(labcases.SWITCH_PROBES, 1)
+        ),
+    ]
+    record = run(21, T0, T0 + 500, source=second, part="probe", expected_issuer=first)
+    for i, (stream, expected) in enumerate(
+        (
+            (events, results.PASS),
+            (events[1:], results.FAIL),
+            (events[:-1], results.FAIL),
+            ([*events, (T0 + 4, "would_block", second, {})], results.FAIL),
+        )
+    ):
+        assert evaluate(tmp_path / str(i), key, stream, [record])[0].verdict == expected

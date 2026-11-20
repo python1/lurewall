@@ -435,3 +435,21 @@ def test_installer_cleans_failed_validation_before_starting_anything(deployment)
     assert not list(target.home.glob(".build-*"))
     assert not list(target.releases.iterdir())
     assert not any(call[0] == "/usr/bin/systemctl" for call in commands.calls)
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_forced_source_uninstall_preserves_evidence(deployment, missing):
+    target, commands = deployment
+    target.deploy("install")
+    commands.nginx_status = 1
+
+    def invoke(argv, **kwargs):
+        if missing and argv[0].endswith("/nginx"):
+            raise FileNotFoundError
+        return commands(argv, **kwargs)
+
+    target.run = invoke
+    evidence = target.state / "events.log"
+    evidence.write_bytes(b"evidence")
+    target.uninstall(force=True)
+    assert evidence.read_bytes() == b"evidence" and not target.launcher.exists()

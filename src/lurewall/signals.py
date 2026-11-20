@@ -29,8 +29,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import unquote_to_bytes, urlsplit
 
+from lurewall import canaries
 from lurewall.accesslog import Record
 from lurewall.canaries import CanaryHit, CanarySet, nginx_normalize
+from lurewall.pathbindings import Issuance, IssuedPaths
 from lurewall.sigconfig import SignalConfig, check_against_site
 
 ATTACK = "attack"
@@ -90,6 +92,10 @@ class Classification:
     path: str | None  # the normalized, lowercased path, or None if nginx would refuse it
     # The quiet canaries this response body carried to the source.
     carries: tuple[str, ...] = ()
+    # A hit on a path this origin previously issued. Never inferred from its shape.
+    receipt: Issuance | None = None
+    # Expiry verified against the logged nginx window on a valid natural carrier.
+    issue_until_ms: int | None = None
 
     @property
     def counted_canary(self) -> CanaryHit | None:
@@ -399,13 +405,22 @@ class Classifier:
         canary_set: CanarySet,
         real_paths,
         carriers: Mapping[str, tuple[str, ...]] | None = None,
+        issued_paths: IssuedPaths | None = None,
     ) -> None:
         # No classifier exists for a config under which a decoy, or a real
         # page, could count as an attack path.
-        check_against_site(config, canary_set, real_paths)
+        routes = tuple(real_paths)
+        check_against_site(config, canary_set, routes)
         self.config = config
         self._canaries = canary_set
-        present = {canary.id for canary in canary_set.canaries}
+        self._natural = canary_set.version == 3
+        self._issued_paths = issued_paths
+        self._real = {canaries.collision_key(path) for path in routes} - {"/"}
+        present = (
+            set(canaries.QUIET_PLACEMENTS)
+            if self._natural
+            else {canary.id for canary in canary_set.canaries}
+        )
         self._carriers = {
             path: tuple(i for i in ids if i in present)
             for path, ids in (carriers or {}).items()
@@ -415,7 +430,23 @@ class Classifier:
     def classify(self, record: Record) -> Classification:
         config = self.config
         target = _strip_origin(record.uri)
-        canary = self._canaries.lookup_uri(target)
+        # Natural traps live only at a previously issued exact destination. An
+        # ordinary successful page (or a request with changed spelling/query)
+        # cannot become binding evidence.
+        receipt = None
+        if (
+            self._natural
+            and self._issued_paths is not None
+            and record.method in ("GET", "HEAD")
+            and record.status == 404
+            and record.lw_source == record.ip
+        ):
+            receipt = self._issued_paths.lookup(target, record.ts_ms)
+        canary = (
+            CanaryHit(canaries.natural_canary(receipt.placement, target), None)
+            if receipt is not None
+            else self._canaries.lookup_uri(target)
+        )
         if canary is not None and canary.canary.quiet and record.method not in ("GET", "HEAD"):
             canary = None  # a quiet decoy counts for GET and HEAD only
         found = attack_signals_for(config, record.method, target, decoy=canary is not None)
@@ -439,6 +470,7 @@ class Classifier:
             )
         )
         carries: tuple[str, ...] = ()
+        issue_until_ms = None
         # The quiet carriers are in the response body, which HEAD omits.
         if (
             reason is None
@@ -448,6 +480,10 @@ class Classifier:
             and record.status == 200
         ):
             carries = self._carriers.get(path, ())
+            if self._natural:
+                if record.lw_placement in carries and target.partition("?")[0] == path:
+                    issue_until_ms = self._natural_expiry(record)
+                carries = ()  # natural placement IDs alone never bind a hit
         return Classification(
             cross_site=reason,
             canary=canary,
@@ -458,4 +494,28 @@ class Classifier:
             browser_metadata=clean and fetch_site in ("same-origin", "same-site", "none"),
             path=path,
             carries=carries,
+            receipt=receipt,
+            issue_until_ms=issue_until_ms,
         )
+
+    def _natural_expiry(self, record: Record) -> int | None:
+        path = record.lw_path
+        until = record.lw_until or ""
+        if (
+            record.lw_source != record.ip
+            or record.stale
+            or not path
+            or not canaries.is_natural_path(path)
+            or not re.fullmatch(r"[0-9]{1,11}", until)
+        ):
+            return None
+        end_ms = int(until) * 1000
+        if not 0 < end_ms - record.ts_ms <= 7 * 86_400_000:
+            return None
+        key = canaries.collision_key(path)
+        if any(
+            key == real or key.startswith(real + "/") or real.startswith(key + "/")
+            for real in self._real
+        ) or attack_signals_for(self.config, "GET", path, decoy=False):
+            return None
+        return end_ms
