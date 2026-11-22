@@ -23,7 +23,9 @@ Case study: [docs/case-study.md](docs/case-study.md). Full lab findings:
 The optional Python reader records which agent identities it can verify from request
 signatures or published source ranges. Impersonation alerts have zero weight in the
 blocking decision. Signed agents still encounter the ordinary canary and probe rules.
-Provider range protections use the client address regardless of User-Agent. The signed
+Provider range protections use the client address regardless of User-Agent. Only Google's
+crawler range files can be authoritative in v0.4.0; a miss against any other feed stays
+indeterminate. A missing or broken `agents.toml` never stops the detector. The signed
 CLI/HTML report and Grafana distinguish verified, impersonation and indeterminate
 observations. See the [setup and rollback guide](docs/operator-guide.md#agent-verification).
 

@@ -368,17 +368,22 @@ timer is opt-in. The helper has no firewall capability or inbound listener.
    `/etc/lurewall/natural/nginx/lurewall-natural-format.conf` as
    `/etc/lurewall/natural/nginx/lurewall-natural-format.conf.pre-v4`
    and install the regenerated format include. Run `nginx -t` and reload.
-2. Copy `/etc/lurewall/agents.example.toml` to `/etc/lurewall/agents.toml`.
-   List only confirmed client-facing TLS authorities (include a non-default port).
-   Check that the original authority, method, target, all signature headers and
-   socket peer survive the actual ingress path. Configure trusted proxy CIDRs
-   narrowly. Leave rewritten CDN/backend authorities out. Avoid mixing confirmed
-   and lossy paths on the same logging vhost.
+2. Copy `/etc/lurewall/agents.example.toml` to `/etc/lurewall/agents.toml`
+   (mode 0644). List only confirmed client-facing TLS authorities in
+   `visible_authorities` (include a non-default port). nginx logs only the
+   **first** `server_name` of the matched server block: when a block serves
+   aliases (`www.example.com` under `server_name example.com`) or is the
+   default block (`server_name _`), list those first names in
+   `visible_server_names`. Check that the original authority, method, target,
+   all signature headers and socket peer survive the actual ingress path.
+   Configure trusted proxy CIDRs narrowly. Leave rewritten CDN/backend
+   authorities out. Avoid mixing confirmed and lossy paths on the same logging
+   vhost. Run `sudo lurewall agent-check` after every edit.
 3. On first setup run `sudo lurewall agent-replay-init`, then
-   `sudo systemctl enable --now lurewall-fetch.timer`,
-   `sudo systemctl start lurewall-fetch.service` and
-   `sudo systemctl restart lurewall.service`. Run `lurewall report --since 10m`
-   and check the fetch unit journal. A missing, corrupt, full or locked replay
+   `sudo systemctl enable --now lurewall-fetch.timer` and
+   `sudo systemctl start lurewall-fetch.service`. The running reader applies
+   `agents.toml` within five seconds of an edit, with no restart. Run
+   `lurewall report --since 10m` and check both units' journals. A missing, corrupt, full or locked replay
    store withholds signature credit. To recover, restore the original store.
    If its history is lost, leave verification offline for at least 24 hours plus
    60 seconds before explicitly creating a fresh store.
@@ -387,7 +392,15 @@ timer is opt-in. The helper has no firewall capability or inbound listener.
    its lowercase `sha256` and integer Unix `pin_until` in the feed table.
    Transfer key sets from a trusted control plane that fetched the configured
    HTTPS directory. A local digest alone cannot establish publisher provenance.
-   Rotate the pins and restart the reader before expiry.
+   Rotate the pins and their `sha256`/`pin_until` before expiry; the reader
+   picks up the edited file without a restart.
+
+`agents.toml` is optional and can never stop the detector. If it is missing,
+verification is off. If it cannot be read or parsed, at startup or after an
+edit, the reader records `agent_config_invalid` in the signed log, writes an
+error to its journal, raises the `service_failure` alert, and keeps the last
+valid settings in force (or stays off). Every applied change is recorded as
+`agent_config_loaded`, removal as `agent_config_removed`.
 
 nginx records version 4, the original request line and URI, original authority
 including port, scheme, protocol, vhost, request duration and three signature
@@ -409,18 +422,33 @@ A minimal authority-only signature provides no assurance about the path or body.
 Exact HTTPS feed URLs, the byte limit (256 KiB default), a three-second
 deadline, public-only DNS resolution and certificate verification apply to
 both kinds of fetch. Redirects are rejected. No content-type assumption is
-made. The helper revalidates according to publisher cache directives, capped
-at one hour and rate-limited to once per minute. It stores local verification
+made. If the first resolved address is unreachable, the helper tries the next
+vetted one inside the same three-second deadline. It revalidates according to
+publisher cache directives, but never sooner than 15 minutes (several
+publishers send `no-store` or `no-cache`) and never later than 45 minutes, so
+the one-hour evidence survives a failed retry. A reader's request for an
+unknown key bypasses those bounds, at most once a minute. It stores local verification
 snapshots with a one-hour lifetime from successful retrieval; publisher
 `creationTime` is informational. An unknown key queues a bounded file request
 for the next timer run. Each read produces its final verdict without waiting.
 Check `alert_after_hours` for persistent retrieval failure alerts.
 
-Only Google's shipped range mappings are authoritative. Other feeds are partial.
-An IP match uses the full client address before IPv6 grouping. A valid expected
-signature or an in-range address verifies a claim. An authoritative miss with no
-valid signature, or a conclusively bad signature for the expected signer, can raise
-an impersonation alert. Missing evidence, unsupported families and rewritten
+Only Google's crawler range files
+(`https://developers.google.com/static/crawling/ipranges/*.json`) can be
+authoritative in this release, and the code enforces it: any other feed marked
+`coverage = "authoritative"` is reported by `agent-check`, the fetch helper and
+the reader, and treated as partial. A miss against a partial feed is never
+evidence. An IP match uses the full client address before IPv6 grouping. A valid
+expected signature or an in-range address verifies a claim. An authoritative miss
+with no valid signature, or a signature that fails verification under the expected
+signer's own published key, can raise an impersonation alert. A genuine signature
+outside its validity window (`expired`) proves the publisher signed it and stays
+indeterminate. A User-Agent naming several mapped agents is judged per name: a
+conclusive failure of any one is reported as impersonation, and otherwise the
+request is verified only if every name verifies. Each impersonation event is
+signed individually with its request ID, line hash and snapshot digests; repeats of
+verified and indeterminate outcomes are rolled up per source, outcome and evidence
+snapshot. Missing evidence, unsupported families and rewritten
 ingress stay indeterminate. Signed browser requests can establish an identity
 even with an ordinary browser User-Agent. Set `alert = false` in a claim table to
 mute its notification while retaining its signed observation. No identity result
