@@ -63,7 +63,7 @@ def target(tmp_path, live=True):
     (tmp_path / "etc/lurewall/engine.toml").write_text(OBSERVER)
     host = Host()
     lifecycle = Lifecycle(
-        tmp_path, runner=host, get_account=lambda _runner: (os.getuid(), os.getgid())
+        tmp_path, runner=host, get_account=lambda *_args: (os.getuid(), os.getgid())
     )
     return lifecycle, host
 

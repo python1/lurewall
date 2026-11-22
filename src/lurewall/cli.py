@@ -28,6 +28,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"lurewall {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
 
+    commands.add_parser("agent-fetch", help="refresh configured identity feeds")
+    commands.add_parser("agent-replay-init", help="explicitly initialize new replay history")
     verify = commands.add_parser(
         "verify",
         help="check a signed log's chain, signatures and anchored checkpoints",
@@ -132,6 +134,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--require-peer-log", action="store_true", help="require the operator log format"
     )
+    run.add_argument("--agents", type=Path, default=Path("/etc/lurewall/agents.toml"))
     run.add_argument("--telemetry-dir", type=Path, help="optional private metrics and alert spool")
     run.add_argument("--once", action="store_true", help="process what is there, then exit")
 
@@ -214,6 +217,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     lab = commands.add_parser("lab", help="the lab test harness (run on test machine A or B)")
     lab_commands = lab.add_subparsers(dest="lab_command", required=True)
+    lab_commands.add_parser("identity",help="run three local identity cases with fresh offline pins")
     lab_commands.add_parser("list", help="list the test cases")
     case = lab_commands.add_parser(
         "case",
@@ -286,6 +290,9 @@ def _lab_command(args: argparse.Namespace) -> int:
     from lurewall import labcases, labclient, results, signing, verify
 
     name = f"lurewall lab {args.lab_command}"
+    if args.lab_command == "identity":
+        from lurewall.identitylab import run
+        return run()
     if args.lab_command == "list":
         for case in labcases.CASES.values():
             flag = " [dry-run only]" if case.dry_run_only else ""
@@ -576,6 +583,7 @@ def _service_command(args: argparse.Namespace) -> int:
                 operator_dir=args.operator_dir,
                 require_peer_log=args.require_peer_log,
                 telemetry_dir=args.telemetry_dir,
+                agents=args.agents,
             )
         )
     except LogCorruptError as exc:
@@ -771,6 +779,17 @@ def _operator_command(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.command in ("agent-fetch", "agent-replay-init"):
+        from lurewall import agentfeeds, agentfetch, webbotauth
+
+        try:
+            if args.command == "agent-fetch":
+                return agentfetch.refresh()
+            webbotauth.initialize(agentfeeds.REPLAY)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f"{args.command}: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        return EXIT_OK
     if args.command == "verify":
         return _verify(args)
     if args.command in ("lab-site", "canaries"):

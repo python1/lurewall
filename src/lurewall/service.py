@@ -20,7 +20,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from lurewall import canaries, engineconfig, labsite, sigconfig, signing
+from lurewall import agentfeeds, canaries, engineconfig, labsite, sigconfig, signing
+from lurewall.agentidentity import Observer
 from lurewall.collector import SignalCollector
 from lurewall.engine import Adapter, Engine, LogOnlyAdapter, journal_alert
 from lurewall.eventlog import EventLog
@@ -51,6 +52,7 @@ class Paths:
     operator_dir: Path | None = None
     require_peer_log: bool = False
     telemetry_dir: Path | None = None
+    agents: Path | None = None
 
 
 def make_adapter(
@@ -121,6 +123,9 @@ class Service:
             labsite.quiet_carriers(canary_set),
             issued_paths=issued_paths,
         )
+        self.identity = None
+        if paths.agents is not None and paths.agents.is_file():
+            self.identity = Observer(paths.agents, agentfeeds.settings(paths.agents))
         signer = signing.EurekaSigner.load(paths.key)
 
         self.config = config
@@ -130,6 +135,7 @@ class Service:
         )
         try:
             sink = self.telemetry.sink(self.events) if self.telemetry is not None else self.events
+            self._sink = sink
             self.collector = SignalCollector(classifier, sink)
             self.adapter = make_adapter(config, runner=runner, clock=clock)
             self.engine = Engine(
@@ -171,6 +177,15 @@ class Service:
         records = self.reader.poll()
         for record in records:
             self.engine.handle(self.collector.handle(record))
+            if self.identity is not None:
+                row = self.identity.observe(record, self._clock())
+                if row:
+                    self._sink.append(
+                        "agent_identity",
+                        record.ip,
+                        {**row, "request_id": record.request_id, "line": record.line_sha256},
+                        rollup_key="|".join((row["verdict"], row["claim"], row["reason"])),
+                    )
         # Saved only after the records were dealt with: after a crash they are
         # read again, never skipped.
         self.reader.commit()

@@ -18,12 +18,13 @@ from pathlib import Path
 
 ACCOUNT = "lurewall"
 MAIN = "lurewall.service"
-TIMERS = ("lurewall-sweeper.timer", "lurewall-notify.timer")
+TIMERS = ("lurewall-sweeper.timer", "lurewall-notify.timer", "lurewall-fetch.timer")
 SERVICES = (
     MAIN,
     "lurewall-sweeper.service",
     "lurewall-notify.service",
     "lurewall-notify-failure.service",
+    "lurewall-fetch.service",
 )
 MANAGED_LOG = Path("/var/log/lurewall/access.jsonl")
 DETACH_NGINX = "Detach the Lurewall nginx configuration, run nginx -t, and reload nginx."
@@ -51,9 +52,9 @@ def checked(runner, *argv):
     return result
 
 
-def service_account(runner):
+def service_account(runner, name=ACCOUNT, home="/var/lib/lurewall"):
     try:
-        user = pwd.getpwnam(ACCOUNT)
+        user = pwd.getpwnam(name)
     except KeyError:
         checked(
             runner,
@@ -61,13 +62,13 @@ def service_account(runner):
             "--system",
             "--group",
             "--home",
-            "/var/lib/lurewall",
+            home,
             "--no-create-home",
             "--shell",
             "/usr/sbin/nologin",
-            ACCOUNT,
+            name,
         )
-        user = pwd.getpwnam(ACCOUNT)
+        user = pwd.getpwnam(name)
     if user.pw_uid == 0 or user.pw_gid == 0 or user.pw_shell != "/usr/sbin/nologin":
         raise LifecycleError("refusing to use an incompatible lurewall account")
     return user.pw_uid, user.pw_gid
@@ -184,6 +185,7 @@ class Lifecycle:
 
     def create_state(self):
         uid, gid = self.get_account(self.runner)
+        self.get_account(self.runner, "lurewall-fetch", "/nonexistent")
         root_info = self.root.stat()
         self.checkpoint.parent.mkdir(parents=True, exist_ok=True)
         for path, mode in (

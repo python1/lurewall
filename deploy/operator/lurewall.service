@@ -7,6 +7,8 @@ OnFailure=lurewall-notify-failure.service
 [Service]
 Type=notify
 NotifyAccess=main
+StateDirectory=lurewall-refresh
+StateDirectoryMode=0755
 User=lurewall
 Group=lurewall
 ExecStart=/opt/lurewall/current/bin/lurewall run \

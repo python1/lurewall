@@ -23,11 +23,12 @@ SYSTEM_PYTHON = "/usr/bin/python3"
 BUILD_PATH = "PATH=/usr/bin:/bin"
 RUNTIME_PATH = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 MAIN = "lurewall.service"
-TIMERS = ("lurewall-sweeper.timer", "lurewall-notify.timer")
+TIMERS = ("lurewall-sweeper.timer", "lurewall-notify.timer", "lurewall-fetch.timer")
 SERVICES = (
     "lurewall-sweeper.service",
     "lurewall-notify.service",
     "lurewall-notify-failure.service",
+    "lurewall-fetch.service",
 )
 PINNED_CRYPTO = Path("third_party/eureka_protocol/src/eureka_daemon/crypto.py")
 MAX_COPY_ENTRIES = 20_000
@@ -237,7 +238,7 @@ class Deployment:
             MAIN: source / "deploy/operator" / MAIN,
             SERVICES[0]: source / "deploy/operator" / SERVICES[0],
             TIMERS[0]: source / "deploy/systemd" / TIMERS[0],
-            **{unit: source / "deploy/systemd" / unit for unit in (*SERVICES[1:], TIMERS[1])},
+            **{unit: source / "deploy/systemd" / unit for unit in (*SERVICES[1:], *TIMERS[1:])},
         }
 
     def systemctl(self, *args, **kwargs):
@@ -430,6 +431,7 @@ class Deployment:
         import tomllib
 
         uid, gid = self.get_account()
+        self.get_account("lurewall-fetch", "/nonexistent")
         root_uid, root_gid = self.root.stat().st_uid, self.root.stat().st_gid
         for path, mode in (
             (self.state, 0o750),
@@ -460,6 +462,8 @@ class Deployment:
             own_directory(self.config / subdir, 0o755, root_uid, root_gid)
         for destination, source in (
             ("engine.toml", "operator/engine.toml"),
+            ("agents.example.toml", "operator/agents.example.toml"),
+            ("nginx/operator-format-v4.conf", "nginx/operator-format-v4.conf"),
             ("signals.toml", "operator/signals.toml"),
             ("nginx/operator-format.conf", "nginx/operator-format.conf"),
             ("systemd/50-enforcement.conf", "operator/50-enforcement.conf"),

@@ -309,6 +309,58 @@
           "legendFormat": "Enforcement failures · {{instance}}"
         }
       ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Verified agents and impersonation attempts",
+      "description": "Identity observations have zero enforcement weight.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "increase(lurewall_agent_verified_total[$__rate_interval])",
+          "refId": "A",
+          "legendFormat": "verified · {{instance}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "increase(lurewall_agent_impersonation_total[$__rate_interval])",
+          "refId": "B",
+          "legendFormat": "impersonation · {{instance}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "increase(lurewall_agent_indeterminate_total[$__rate_interval])",
+          "refId": "C",
+          "legendFormat": "indeterminate · {{instance}}"
+        }
+      ]
     }
   ]
 }

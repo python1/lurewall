@@ -26,8 +26,29 @@ MAX_BODY = 524288
 WORD = re.compile(r"[a-z]{3,24}")
 EXTENSIONS = {"html", "htm", "txt", "xml", "pdf", "csv", "json"}
 EXCLUDE = EXTENSIONS | {"index", "robots", "well", "known", "security", "sitemap"}
-LOG_FORMAT = """log_format lurewall_natural escape=json
-  '{"ts":"$msec","ip":"$realip_remote_addr","method":"$request_method",'
+LOG_FORMAT = """map $http_signature $lwn4_signature {
+  default $http_signature;
+  "~^.{8193}" "!overflow";
+}
+map $http_signature_input $lwn4_signature_input {
+  default $http_signature_input;
+  "~^.{8193}" "!overflow";
+}
+map $http_signature_agent $lwn4_signature_agent {
+  default $http_signature_agent;
+  "~^.{8193}" "!overflow";
+}
+log_format lurewall_natural escape=json
+  '{"v":"4",'
+  '"scheme":"$scheme",'
+  '"authority":"$http_host",'
+  '"ingress":"$server_name",'
+  '"protocol":"$server_protocol",'
+  '"duration":"$request_time",'
+  '"signature":"$lwn4_signature",'
+  '"signature_input":"$lwn4_signature_input",'
+  '"signature_agent":"$lwn4_signature_agent",'
+  '"ts":"$msec","ip":"$realip_remote_addr","method":"$request_method",'
   '"request":"$request","uri":"$request_uri","status":"$status",'
   '"ua":"$http_user_agent","lang":"$http_accept_language","referer":"$http_referer",'
   '"sec_fetch_site":"$http_sec_fetch_site","request_id":"$request_id",'

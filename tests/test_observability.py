@@ -48,6 +48,9 @@ def test_metrics_are_bounded_aggregate_and_go_down_on_clean_stop(tmp_path):
     sink.append("parse_failure_rollup", None, {"count": 12})
     telemetry.publish(records=6, active_blocks=2, lag_bytes=17, enforcing=True, log_stopped=True)
     expected = {
+        "lurewall_agent_verified_total": "0",
+        "lurewall_agent_impersonation_total": "0",
+        "lurewall_agent_indeterminate_total": "0",
         "lurewall_up": "1",
         "lurewall_metrics_timestamp_seconds": str(clock.now),
         "lurewall_records_processed_total": "6",

@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh configured verification feeds and service pending key requests
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

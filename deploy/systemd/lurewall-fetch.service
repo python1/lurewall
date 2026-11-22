@@ -1,0 +1,29 @@
+[Unit]
+Description=Refresh public agent identity evidence
+After=network-online.target time-sync.target
+ConditionPathExists=/etc/lurewall/agents.toml
+OnFailure=lurewall-notify-failure.service
+
+[Service]
+Type=oneshot
+User=lurewall-fetch
+Group=lurewall-fetch
+ExecStart=/opt/lurewall/current/bin/lurewall agent-fetch
+CacheDirectory=lurewall-fetch
+CacheDirectoryMode=0755
+Environment=SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+InaccessiblePaths=-/var/lib/lurewall -/var/log/lurewall -/srv/lurewall
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+UMask=0077
+

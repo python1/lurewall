@@ -1,0 +1,123 @@
+# Created by Paul Charydczak
+# Copy to agents.toml to activate. Confirm capture at these TLS virtual hosts first.
+visible_authorities = []
+alert_after_hours = 6
+
+[feed.gptbot]
+url = "https://openai.com/gptbot.json"
+coverage = "partial"
+
+[claim.GPTBot]
+ranges = "gptbot"
+
+[feed.chatgpt-user]
+url = "https://openai.com/chatgpt-user.json"
+coverage = "partial"
+
+[claim.ChatGPT-User]
+ranges = "chatgpt-user"
+
+[feed.searchbot]
+url = "https://openai.com/searchbot.json"
+coverage = "partial"
+
+[claim.OAI-SearchBot]
+ranges = "searchbot"
+
+[feed.adsbot]
+url = "https://openai.com/adsbot.json"
+coverage = "partial"
+
+[claim.OAI-AdsBot]
+ranges = "adsbot"
+
+[feed.perplexitybot]
+url = "https://www.perplexity.ai/perplexitybot.json"
+coverage = "partial"
+
+[claim.PerplexityBot]
+ranges = "perplexitybot"
+
+[feed.perplexity-user]
+url = "https://www.perplexity.ai/perplexity-user.json"
+coverage = "partial"
+
+[claim.Perplexity-User]
+ranges = "perplexity-user"
+
+[feed.mistral-user]
+url = "https://mistral.ai/mistralai-user-ips.json"
+coverage = "partial"
+
+[claim.MistralAI-User]
+ranges = "mistral-user"
+
+[feed.mistral-index]
+url = "https://mistral.ai/mistralai-index-ips.json"
+coverage = "partial"
+
+[claim.MistralAI-Index]
+ranges = "mistral-index"
+
+[feed.anthropic]
+url = "https://claude.com/crawling/bots.json"
+coverage = "partial"
+
+[claim.ClaudeBot]
+ranges = "anthropic"
+publisher = "Anthropic"
+
+[claim.Claude-User]
+ranges = "anthropic"
+publisher = "Anthropic"
+
+[claim.Claude-SearchBot]
+ranges = "anthropic"
+publisher = "Anthropic"
+
+[feed.common-crawlers]
+url = "https://developers.google.com/static/crawling/ipranges/common-crawlers.json"
+coverage = "authoritative"
+
+[claim.Googlebot]
+ranges = "common-crawlers"
+
+[claim.Googlebot-Image]
+ranges = "common-crawlers"
+
+[claim.Googlebot-News]
+ranges = "common-crawlers"
+
+[claim.Googlebot-Video]
+ranges = "common-crawlers"
+
+[feed.special-crawlers]
+url = "https://developers.google.com/static/crawling/ipranges/special-crawlers.json"
+coverage = "authoritative"
+
+[claim.AdsBot-Google]
+ranges = "special-crawlers"
+
+[claim.AdsBot-Google-Mobile]
+ranges = "special-crawlers"
+
+[feed.user-triggered-agents]
+url = "https://developers.google.com/static/crawling/ipranges/user-triggered-agents.json"
+coverage = "authoritative"
+
+[claim.Google-Agent]
+ranges = "user-triggered-agents"
+keys = "google-agent"
+
+[claim.MistralAI-Training]
+
+[feed.cloud-browser]
+url = "https://chatgpt.com/.well-known/http-message-signatures-directory"
+signer = "https://chatgpt.com"
+thumbprint = true
+
+[feed.google-agent]
+url = "https://agent.bot.goog/.well-known/http-message-signatures-directory"
+signer = "https://agent.bot.goog"
+thumbprint = false
+

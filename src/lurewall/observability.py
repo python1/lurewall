@@ -27,7 +27,7 @@ METRICS_FILE = "lurewall.prom"
 _PUBLISH_INTERVAL_S = 15
 _HEALTH_WARNING_INTERVAL_S = 60
 _WEBHOOK_TIMEOUT_S = 5
-_ALERTS = ("integrity_stop", "service_failure", "block_applied")
+_ALERTS = ("integrity_stop", "service_failure", "block_applied", "impersonation")
 _HEALTH_MESSAGES = {
     "enforcement_failed": "Lurewall could not apply or reconcile firewall state",
     "access_log_unavailable": "Lurewall cannot read the configured nginx access log",
@@ -36,7 +36,7 @@ _HEALTH_MESSAGES = {
 }
 _LOGGER = logging.getLogger(__name__)
 
-Alert = Literal["integrity_stop", "service_failure", "block_applied"]
+Alert = Literal["integrity_stop", "service_failure", "block_applied", "impersonation"]
 Sender = Callable[[SplitResult, Alert], bool]
 
 
@@ -93,6 +93,9 @@ class Telemetry:
         self._clock = clock
         self._published_at: float | None = None
         self._metrics = {
+            "agent_verified_total": 0,
+            "agent_impersonation_total": 0,
+            "agent_indeterminate_total": 0,
             "records_processed_total": 0,
             "blocks_applied_total": 0,
             "would_block_total": 0,
@@ -112,7 +115,13 @@ class Telemetry:
         return _ObservedSink(target, self)
 
     def _event(self, kind: str, detail: dict | None) -> None:
-        if kind == "block_applied" or (kind == "block" and (detail or {}).get("applied") is True):
+        if kind == "agent_identity":
+            status = (detail or {}).get("verdict")
+            if status in ("verified", "impersonation", "indeterminate"):
+                self._metrics[f"agent_{status}_total"] += 1
+            if status == "impersonation":
+                self._queue("impersonation")
+        elif kind == "block_applied" or (kind == "block" and (detail or {}).get("applied") is True):
             self._metrics["blocks_applied_total"] += 1
             self._queue("block_applied")
         elif kind == "would_block":
