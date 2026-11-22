@@ -5,7 +5,9 @@ import base64
 import contextlib
 import hashlib
 import ipaddress
+import os
 import re
+import stat
 
 from lurewall import webbotauth
 from lurewall.agentfeeds import CACHE, REPLAY, REQUESTS, atomic, parse_feed, strict_json
@@ -32,13 +34,17 @@ class Observer:
             else self.cache / (feed.name + ".json")
         )
         try:
-            stat = path.stat()
-            stamp = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
-            stored = self.loaded.get(feed.name)
-            if stored is None or stored[0] != stamp:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError("invalid snapshot file")
+                stamp = (info.st_ino, info.st_mtime_ns, info.st_size)
+                stored = self.loaded.get(feed.name)
+                if stored is not None and stored[0] == stamp:
+                    return (stored[3], stored[4]) if stored[1] <= now < stored[2] else (None, None)
                 limit = feed.limit if feed.pin else 2 * feed.limit + 1024
-                with path.open("rb") as stream:
-                    raw = stream.read(limit + 1)
+                raw = stream.read(limit + 1)
                 if len(raw) > limit:
                     raise ValueError("oversized snapshot")
                 if feed.pin:
@@ -151,7 +157,7 @@ class Observer:
                 sig = "key_unavailable" if keys is None else "insecure_transport"
             else:
                 row["key_snapshot"] = ref
-                sig = webbotauth.check(record, keyfeed, keys, self.replay, now)
+                sig = webbotauth.check(record, keyfeed, keys, self.replay, now, evidence=row)
                 if sig == "unknown_kid":
                     self.refresh_request(keyfeed, now)
         row.update(ip_result=ip_state, signature_result=sig)

@@ -264,3 +264,36 @@ def test_systemd_notify_after_startup_uses_only_local_datagram(monkeypatch):
 def test_config_refuses_unsafe_enforcement_settings(raw, reason):
     with pytest.raises(engineconfig.EngineConfigError, match=reason):
         engineconfig.parse("version = 1\n" + raw)
+
+
+def test_impersonation_is_signed_and_never_added_to_source_attack_state(local, tmp_path):
+    from dataclasses import replace
+
+    from lurewall import identitylab
+
+    paths, signer, clock = local
+    now = clock.now // 1000
+    obs, _, _ = identitylab.fixture(tmp_path, now)
+    config = obs.config
+    config.write_text(
+        config.read_text().replace('coverage = "partial"', 'coverage = "authoritative"')
+    )
+    fields = identitylab.log_fields(now)
+    paths.access_log.write_text(json.dumps(fields) + "\n")
+    running = service.Service(replace(paths, agents=config), clock=clock, fsync=False)
+    try:
+        assert running.step() == 1
+        view = running.collector.tracker.view(fields["ip"])
+        assert view.attack_keys == () and view.attack_requests == 0
+        assert not running.engine.active_blocks()
+    finally:
+        running.close()
+    from lurewall.verify import verify_log
+
+    items = []
+    assert verify_log(
+        paths.event_log, signer.public_key_hex, [paths.checkpoint], visit=items.append
+    ).ok
+    (identity,) = [item for item in items if item.type == "agent_identity"]
+    assert identity.detail["verdict"] == "impersonation" and identity.detail["counted"] is False
+    assert identity.detail["duration_ms"] == 10

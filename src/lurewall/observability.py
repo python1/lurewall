@@ -14,12 +14,14 @@ import os
 import ssl
 import stat
 import time
+from collections import Counter
 from collections.abc import Callable
 from http.client import HTTPException, HTTPSConnection
 from pathlib import Path
 from typing import Literal
 from urllib.parse import SplitResult, urlsplit
 
+from lurewall.agentfeeds import NAME
 from lurewall.logreader import Sink
 
 WEBHOOK_ENV = "LUREWALL_WEBHOOK_URL"
@@ -92,6 +94,7 @@ class Telemetry:
         self._directory = directory
         self._clock = clock
         self._published_at: float | None = None
+        self._agent_counts = Counter()
         self._metrics = {
             "agent_verified_total": 0,
             "agent_impersonation_total": 0,
@@ -119,6 +122,14 @@ class Telemetry:
             status = (detail or {}).get("verdict")
             if status in ("verified", "impersonation", "indeterminate"):
                 self._metrics[f"agent_{status}_total"] += 1
+                claim = detail.get("claim", "")
+                method = detail.get("reason") if status == "verified" else "none"
+                if (
+                    isinstance(claim, str)
+                    and NAME.fullmatch(claim)
+                    and method in ("signature", "ip_range", "both", "none")
+                ):
+                    self._agent_counts[status, claim, method] += 1
             if status == "impersonation" and (detail or {}).get("alert") is True:
                 self._queue("impersonation")
         elif kind == "block_applied" or (kind == "block" and (detail or {}).get("applied") is True):
@@ -198,6 +209,13 @@ class Telemetry:
             f"lurewall_{name} {value}\n"
             for name, value in snapshot.items()
         )
+        if self._agent_counts:
+            content += "# TYPE lurewall_agent_claims_total counter\n"
+            for (status, claim, method), count in sorted(self._agent_counts.items()):
+                content += (
+                    f'lurewall_agent_claims_total{{verdict="{status}",claim="{claim}",'
+                    f'method="{method}"}} {count}\n'
+                )
         try:
             _publish_file(self._directory, content)
         except OSError:

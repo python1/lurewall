@@ -190,7 +190,7 @@ def parse_feed(feed, raw):
                 raise ValueError("invalid Ed25519 key")
         elif not 256 <= len(binary(row["n"])) <= 1024 or len(binary(row["e"])) > 4:
             raise ValueError("invalid RSA key")
-        kid = row.get("kid", thumb(row) if feed.thumbprint else None)
+        kid = row.get("kid")
         if not isinstance(kid, str) or not 0 < len(kid) <= 256 or kid in keys:
             raise ValueError("invalid key identifier")
         if row.get("signature_agent", feed.signer) != feed.signer:

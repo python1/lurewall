@@ -229,3 +229,24 @@ def test_legacy_draft_vector(lab):
     )
     row = parse_line(json.dumps(f).encode(), 0, now_ms=now * 1000, max_age_ms=1000)
     assert webbotauth.check(row, feed, {kid: keyspec}, obs.replay, now) == "valid"
+
+
+def test_missing_signature_components_on_authoritative_claim_are_inconclusive(lab):
+    obs, key, kid = lab
+    obs.settings.feeds["ranges"] = replace(obs.settings.feeds["ranges"], authoritative=True)
+    f = log_fields(NOW)
+    sign_fields(f, NOW, key, kid)
+    f.update(ua="LabBot", signature_input="")
+    assert observe(obs, f, NOW)["verdict"] == "indeterminate"
+
+
+def test_no_unpublished_identifier_fallback_or_signal_count_setting(tmp_path, lab):
+    obs, _, _ = lab
+    feed = replace(obs.settings.feeds["lab"], thumbprint=True)
+    raw = json.loads((tmp_path / "pins/lab.json").read_bytes())
+    del raw["keys"][0]["kid"]
+    with pytest.raises(ValueError, match="identifier"):
+        agentfeeds.parse_feed(feed, json.dumps(raw))
+    obs.config.write_text(obs.config.read_text() + "\ncount_toward_block = true\n")
+    with pytest.raises(ValueError, match="claim policy"):
+        agentfeeds.settings(obs.config)

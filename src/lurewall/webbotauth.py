@@ -255,26 +255,38 @@ def verify_one(record, feed, keys, label, entry, sig, legacy, db, now):
     return remember(db, thumb(key), token, record, expires + 60, now)
 
 
-def check(record, feed, keys, replay, now):
+def check(record, feed, keys, replay, now, *, evidence=None):
     cap = record.capture
     try:
         with contextlib.closing(replay_db(replay)) as db:
             directory = agents(cap["signature_agent"])
             inputs = dictionary(cap["signature_input"], "input")
             signatures = dictionary(cap["signature"], "signature")
+            if not inputs or not signatures or not directory:
+                return "incomplete"
             legacy = None in directory
             results = []
             for label, entry in inputs.items():
                 if directory.get(None if legacy else label) != feed.signer:
                     continue
                 if label not in signatures:
-                    return "incomplete"
+                    results.append("incomplete")
+                    continue
                 outcome = verify_one(
                     record, feed, keys, label, entry, signatures[label], legacy, db, now
                 )
                 if outcome == "valid":
+                    if evidence is not None:
+                        covered, params, _ = entry
+                        evidence.update(
+                            signer=feed.signer,
+                            key_thumbprint=thumb(keys[params["keyid"]]),
+                            covered=list(dict.fromkeys(c[0] for c in covered)),
+                        )
                     return outcome
                 results.append(outcome)
+            if feed.signer in directory.values() and not results:
+                return "incomplete"
             if "unknown_kid" in results:
                 return "unknown_kid"
             if results and all(r in ("bad_signature", "expired") for r in results):

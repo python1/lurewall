@@ -361,6 +361,40 @@
           "legendFormat": "indeterminate · {{instance}}"
         }
       ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Identity evidence by claim and method",
+      "description": "Identity observations have zero enforcement weight.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (claim, method, verdict) (increase(lurewall_agent_claims_total[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{claim}} · {{verdict}} · {{method}}"
+        }
+      ]
     }
   ]
 }

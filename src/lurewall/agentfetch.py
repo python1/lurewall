@@ -38,6 +38,8 @@ def download(feed):
             ip = getattr(ip, "ipv4_mapped", None) or ip
             if (
                 not ip.is_global
+                or ip.is_reserved
+                or getattr(ip, "is_site_local", False)
                 or ip.is_multicast
                 or getattr(ip, "sixtofour", None)
                 or getattr(ip, "teredo", None)
@@ -97,7 +99,8 @@ def refresh(config=CONFIG, cache=CACHE, requests=REQUESTS, *, fetch=download, cl
             old = {}
         if (
             old.get("url") == feed.url
-            and old.get("refresh", 0) > now
+            and type(old.get("refresh")) is int
+            and old["refresh"] > now
             and requested == old.get("request", 0)
         ):
             continue
