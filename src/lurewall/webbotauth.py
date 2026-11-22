@@ -219,9 +219,7 @@ def verify_one(record, feed, keys, label, entry, sig, legacy, db, now):
     ):
         return "unsupported_lifetime"
     arrival = (record.ts_ms - record.duration_ms) // 1000
-    if not key.get("nbf", 0) <= arrival < key.get("exp", 2**63) or not key.get(
-        "nbf", 0
-    ) <= created < key.get("exp", 2**63):
+    if not all(key.get("nbf", 0) <= t < key.get("exp", 2**63) for t in (created, arrival, now)):
         return "key_outside_validity"
     alg, jwa = ("ed25519", "EdDSA") if key["kty"] == "OKP" else ("rsa-pss-sha512", "PS512")
     if (

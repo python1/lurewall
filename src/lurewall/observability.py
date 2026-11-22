@@ -119,7 +119,7 @@ class Telemetry:
             status = (detail or {}).get("verdict")
             if status in ("verified", "impersonation", "indeterminate"):
                 self._metrics[f"agent_{status}_total"] += 1
-            if status == "impersonation":
+            if status == "impersonation" and (detail or {}).get("alert") is True:
                 self._queue("impersonation")
         elif kind == "block_applied" or (kind == "block" and (detail or {}).get("applied") is True):
             self._metrics["blocks_applied_total"] += 1

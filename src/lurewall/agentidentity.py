@@ -105,13 +105,21 @@ class Observer:
         }
 
         def verdict(status, reason):
-            return {**row, "verdict": status, "reason": reason}
+            return {
+                **row,
+                "verdict": status,
+                "reason": reason,
+                "alert": status == "impersonation" and policy.get("alert", True),
+            }
 
         if (
             not cap
+            or record.stale
             or record.invalid_utf8
             or record.duration_ms is None
             or not record.client_visible
+            or cap["scheme"] != "https"
+            or record.request != f"{record.method} {record.uri} {cap['protocol']}"
             or cap["authority"].lower() not in self.settings.ingress
             or cap["ingress"].lower() != cap["authority"].lower().split(":")[0]
             or record.status in (400, 414, 431)

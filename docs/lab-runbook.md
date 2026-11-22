@@ -592,3 +592,13 @@ half passes only when the signed relay has A as issuer and B as requester,
 both fixture probes appear for B, and B has no counted hit, would-block or
 block. Inspect either endpoint with `explain-decision` and the time window
 with `report`. Do not publish the reference, addresses or private ledgers.
+
+## Offline agent identity cases
+
+Run `lurewall lab identity`. It exercises the v4 parser and reader-side verifier
+with temporary local pins, a freshly generated key and a disposable replay store.
+A deliberately spoofed GPTBot outside its partial feed must remain indeterminate.
+An authentic signed request with an ordinary browser UA must verify. Reusing it
+on a second request must report replay. Each case has zero enforcement weight.
+Real-crawler end-to-end validation requires a separate observe-only period on a
+public host. The offline cases make no claim about that traffic.

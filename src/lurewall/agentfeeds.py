@@ -44,8 +44,24 @@ class Settings:
 def settings(path=CONFIG):
     with path.open("rb") as stream:
         spec = tomllib.load(stream)
+    if set(spec) - {"feed", "claim", "visible_authorities", "alert_after_hours"}:
+        raise ValueError("unknown agents configuration option")
     feeds = {}
     for name, row in spec.get("feed", {}).items():
+        if not isinstance(row, dict) or set(row) - {
+            "url",
+            "signer",
+            "limit",
+            "coverage",
+            "thumbprint",
+            "sha256",
+            "pin_until",
+        }:
+            raise ValueError("unknown feed option")
+        if type(row.get("thumbprint", False)) is not bool or not isinstance(row.get("url"), str):
+            raise ValueError("invalid feed URL or thumbprint policy")
+        if not all(33 <= ord(char) < 127 for char in row["url"]) or "\\" in row["url"]:
+            raise ValueError("invalid feed URL characters")
         url = urlsplit(row["url"])
         signer = row.get("signer", "")
         if (
@@ -86,8 +102,13 @@ def settings(path=CONFIG):
         )
     claims = spec.get("claim", {})
     for token, row in claims.items():
-        if not NAME.fullmatch(token) or set(row) - {"ranges", "keys", "publisher"}:
+        if not NAME.fullmatch(token) or set(row) - {"ranges", "keys", "publisher", "alert"}:
             raise ValueError("invalid claim policy")
+        if (
+            not NAME.fullmatch(row.get("publisher", token))
+            or type(row.get("alert", True)) is not bool
+        ):
+            raise ValueError("invalid publisher or alert setting")
         for kind in ("ranges", "keys"):
             if kind in row and (
                 row[kind] not in feeds or bool(feeds[row[kind]].signer) != (kind == "keys")

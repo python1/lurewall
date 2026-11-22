@@ -18,6 +18,15 @@ Created by Paul Charydczak.
 Case study: [docs/case-study.md](docs/case-study.md). Full lab findings:
 [docs/lab-findings.md](docs/lab-findings.md).
 
+## v0.4 agent verification
+
+The optional Python reader records which agent identities it can verify from request
+signatures or published source ranges. Impersonation alerts have zero weight in the
+blocking decision. Signed agents still encounter the ordinary canary and probe rules.
+Provider range protections use the client address regardless of User-Agent. The signed
+CLI/HTML report and Grafana distinguish verified, impersonation and indeterminate
+observations. See the [setup and rollback guide](docs/operator-guide.md#agent-verification).
+
 ## v0.3.0 operator workflow
 
 Created by Paul Charydczak.

@@ -89,14 +89,16 @@ def refresh(config=CONFIG, cache=CACHE, requests=REQUESTS, *, fetch=download, cl
         attempt = cache / (feed.name + ".attempt")
         marker = requests / feed.name
         # A reader can only request the configured directory, never a URL or a kid.
-        requested = int(marker.stat().st_mtime) if marker.is_file() else 0
+        requested = marker.stat().st_mtime_ns if marker.is_file() else 0
         old = {}
         with contextlib.suppress(OSError, ValueError, TypeError):
             old = strict_json(path.read_bytes())
+        if not isinstance(old, dict):
+            old = {}
         if (
             old.get("url") == feed.url
             and old.get("refresh", 0) > now
-            and requested <= old.get("fetched", 0)
+            and requested == old.get("request", 0)
         ):
             continue
         first, last = now, 0
@@ -118,6 +120,7 @@ def refresh(config=CONFIG, cache=CACHE, requests=REQUESTS, *, fetch=download, cl
                 "fetched": now,
                 "expires": now + 3600,
                 "refresh": now + max(60, ttl),
+                "request": requested,
                 "digest": hashlib.sha256(raw).hexdigest(),
                 "body": base64.b64encode(raw).decode(),
             }

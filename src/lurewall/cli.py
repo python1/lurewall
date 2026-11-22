@@ -217,7 +217,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     lab = commands.add_parser("lab", help="the lab test harness (run on test machine A or B)")
     lab_commands = lab.add_subparsers(dest="lab_command", required=True)
-    lab_commands.add_parser("identity",help="run three local identity cases with fresh offline pins")
+    lab_commands.add_parser(
+        "identity", help="run three local identity cases with fresh offline pins"
+    )
     lab_commands.add_parser("list", help="list the test cases")
     case = lab_commands.add_parser(
         "case",
@@ -292,6 +294,7 @@ def _lab_command(args: argparse.Namespace) -> int:
     name = f"lurewall lab {args.lab_command}"
     if args.lab_command == "identity":
         from lurewall.identitylab import run
+
         return run()
     if args.lab_command == "list":
         for case in labcases.CASES.values():

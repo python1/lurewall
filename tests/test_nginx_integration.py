@@ -124,6 +124,9 @@ def lab(tmp_path_factory):
 
     base = tmp_path_factory.mktemp("nginx-lab")
     port = _free_port()
+    h2_port = _free_port()
+    while h2_port == port:
+        h2_port = _free_port()
     canary_set = canaries.generate(labsite.site_routes(), rng=random.Random(4242))
     site = labsite.build(canary_set, base / "site", listen=f"127.0.0.1:{port}")
 
@@ -133,9 +136,12 @@ def lab(tmp_path_factory):
     # The rate limit is not under test here, and these tests are quick on purpose.
     log_conf = log_conf.replace("rate=10r/s", "rate=5000r/s").replace("burst=20", "burst=5000")
     if "http_realip_module" in version:
-        operator_format = (REPO / "deploy" / "nginx" / "operator-format.conf").read_text()
+        operator_format = (REPO / "deploy" / "nginx" / "operator-format-v4.conf").read_text()
         log_conf += (
             f"\n{operator_format}\n"
+            "    large_client_header_buffers 4 16k;\n"
+            f"    server {{ listen 127.0.0.1:{h2_port} http2; server_name origin.example; "
+            f"access_log {base}/operator.log lurewall_operator; return 204; }}\n"
             f"    access_log {base}/operator.log lurewall_operator;\n"
             "    set_real_ip_from 127.0.0.1;\n"
             "    real_ip_header X-Forwarded-For;\n"
@@ -173,7 +179,9 @@ def lab(tmp_path_factory):
             if time.monotonic() > deadline:
                 pytest.fail("nginx did not start listening")
             time.sleep(0.05)
-        yield Lab(base, port, canary_set, process)
+        instance = Lab(base, port, canary_set, process)
+        instance.h2_port = h2_port
+        yield instance
     finally:
         process.terminate()
         with contextlib.suppress(subprocess.TimeoutExpired):
@@ -603,3 +611,39 @@ def test_cross_site_headers_as_a_real_nginx_logs_them(lab):
         result = classifier.classify(record)
         assert result.cross_site == reason
         assert result.attack == ()
+
+
+def test_v4_http2_authority_and_bounded_signature(lab):
+    from h2.connection import H2Connection
+
+    ua = fresh_ua()
+    authority = f"origin.example:{lab.h2_port}"
+    h2 = H2Connection()
+    with socket.create_connection(("127.0.0.1", lab.h2_port), timeout=5) as sock:
+        h2.initiate_connection()
+        h2.send_headers(
+            1,
+            [
+                (":method", "GET"),
+                (":scheme", "http"),
+                (":authority", authority),
+                (":path", "/"),
+                ("user-agent", ua),
+            ],
+            end_stream=True,
+        )
+        sock.sendall(h2.data_to_send())
+        from h2.events import StreamEnded
+
+        while True:
+            data = sock.recv(16384)
+            assert data
+            if any(isinstance(event, StreamEnded) for event in h2.receive_data(data)):
+                break
+    row = lab.record_for(ua, operator=True)
+    assert row.capture["protocol"] == "HTTP/2.0"
+    assert row.capture["authority"] == authority
+    assert type(row.duration_ms) is int
+    ua = fresh_ua()
+    assert lab.get("/", ua=ua, headers={"Signature": "s" * 9000})[0] == 200
+    assert lab.record_for(ua, operator=True).capture["signature"] == "!overflow"

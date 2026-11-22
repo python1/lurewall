@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
+    "h2>=4,<5", # HTTP/2 integration client (tests only)
     "ruff==0.17.5",
 ]
 
