@@ -105,7 +105,9 @@ def test_degraded_running_service_queues_health_alert_and_limits_journal(tmp_pat
         sink.append("access_log_unavailable", None)
         sink.append("parse_failure", None)
         telemetry.publish(log_stopped=True)
-    assert caplog.messages == list(observability._HEALTH_MESSAGES.values())
+    service_health = dict(observability._HEALTH_MESSAGES)
+    service_health.pop("agent_config_invalid")
+    assert caplog.messages == list(service_health.values())
     assert "private fixture" not in caplog.text
     assert (tmp_path / "service_failure.pending").read_bytes() == b""
     clock.advance(60)

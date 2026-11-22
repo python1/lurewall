@@ -14,6 +14,7 @@ log has one writer, and that writer may be running or may not.
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -21,7 +22,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from lurewall import agentfeeds, canaries, engineconfig, labsite, sigconfig, signing
-from lurewall.agentidentity import Observer
+from lurewall.agentidentity import Runtime
 from lurewall.collector import SignalCollector
 from lurewall.engine import Adapter, Engine, LogOnlyAdapter, journal_alert
 from lurewall.eventlog import EventLog
@@ -53,6 +54,9 @@ class Paths:
     require_peer_log: bool = False
     telemetry_dir: Path | None = None
     agents: Path | None = None
+    agent_cache: Path = agentfeeds.CACHE
+    agent_requests: Path = agentfeeds.REQUESTS
+    agent_replay: Path = agentfeeds.REPLAY
 
 
 def make_adapter(
@@ -123,9 +127,9 @@ class Service:
             labsite.quiet_carriers(canary_set),
             issued_paths=issued_paths,
         )
+        # Identity verification is optional and alert-only. Its configuration is
+        # loaded after the signed log opens and can never stop the detector.
         self.identity = None
-        if paths.agents is not None and paths.agents.is_file():
-            self.identity = Observer(paths.agents, agentfeeds.settings(paths.agents))
         signer = signing.EurekaSigner.load(paths.key)
 
         self.config = config
@@ -161,6 +165,15 @@ class Service:
             )
             for canary_id in disabled:
                 self.events.append("canary_disabled_collision", None, {"canary": canary_id})
+            if paths.agents is not None:
+                self.identity = Runtime(
+                    paths.agents,
+                    cache=paths.agent_cache,
+                    requests=paths.agent_requests,
+                    replay=paths.agent_replay,
+                    report=self._identity_report,
+                )
+                self.identity.reload(clock(), force=True)
             self._process_control()
             report = self.engine.start()
             if paths.require_peer_log and config.enforcing and report is None:
@@ -178,14 +191,7 @@ class Service:
         for record in records:
             self.engine.handle(self.collector.handle(record))
             if self.identity is not None:
-                row = self.identity.observe(record, self._clock())
-                if row:
-                    self._sink.append(
-                        "agent_identity",
-                        record.ip,
-                        {**row, "request_id": record.request_id, "line": record.line_sha256},
-                        rollup_key="|".join((row["verdict"], row["claim"], row["reason"])),
-                    )
+                self._observe_identity(record)
         # Saved only after the records were dealt with: after a crash they are
         # read again, never skipped.
         self.reader.commit()
@@ -201,6 +207,45 @@ class Service:
             )
         return len(records)
 
+    def _identity_report(self, kind: str, detail: dict) -> None:
+        if kind == "agent_config_invalid":
+            journal_alert(f"agent identity configuration not applied: {detail['error']}")
+        for warning in detail.get("warnings", ()):
+            print(f"<4>lurewall: {warning}", file=sys.stderr, flush=True)
+        self._sink.append(kind, None, detail)
+
+    def _observe_identity(self, record) -> None:
+        try:
+            row = self.identity.observe(record, self._clock())
+        except Exception as exc:  # an alert-only feature never stops the reader
+            row = {
+                "verdict": "indeterminate",
+                "reason": "observer_error",
+                "claim": "unknown",
+                "error": type(exc).__name__,
+                "counted": False,
+                "alert": False,
+            }
+        if not row:
+            return
+        detail = {**row, "request_id": record.request_id, "line": record.line_sha256}
+        if row["verdict"] == "impersonation":
+            # Every alertable event keeps its own request, line and snapshot evidence.
+            self._sink.append("agent_identity", record.ip, detail)
+            return
+        # Repeats of an ordinary outcome are counted per evidence snapshot, so a
+        # roll-up still names the exact range and key files that decided it.
+        key = "|".join(
+            (
+                row["verdict"],
+                row["claim"],
+                row["reason"],
+                str(row.get("range_snapshot", ""))[:16],
+                str(row.get("key_snapshot", ""))[:16],
+            )
+        )
+        self._sink.append("agent_identity", record.ip, detail, rollup_key=key)
+
     def _process_control(self) -> None:
         if self._operator_dir is None:
             return
@@ -214,6 +259,8 @@ class Service:
                 stop.wait(interval_s)
 
     def close(self) -> None:
+        if self.identity is not None:
+            self.identity.close()
         try:
             self.engine.close()
             self.reader.close()

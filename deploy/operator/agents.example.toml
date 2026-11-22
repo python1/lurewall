@@ -1,7 +1,17 @@
 # Created by Paul Charydczak
-# Copy to agents.toml to activate. Confirm capture at these TLS virtual hosts first.
+# Copy to agents.toml to activate. Confirm capture at these TLS virtual hosts first,
+# then run `lurewall agent-check`. Edits apply within seconds, without a restart; an
+# invalid file is reported and the last valid settings stay in force.
+#
+# visible_authorities: the Host values clients send (add :port if not 443).
 visible_authorities = []
+# visible_server_names: the FIRST server_name of each confirmed nginx server block
+# (nginx logs only that one). Leave empty to accept the hosts listed above; list
+# them when a block serves aliases (www.example.com under example.com) or is "_".
+visible_server_names = []
 alert_after_hours = 6
+# Only Google's crawler range files may set coverage = "authoritative" in this
+# release. Any other feed marked authoritative is reported and treated as partial.
 
 [feed.gptbot]
 url = "https://openai.com/gptbot.json"

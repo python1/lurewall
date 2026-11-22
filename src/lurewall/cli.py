@@ -29,6 +29,10 @@ def _build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("agent-fetch", help="refresh configured identity feeds")
+    agent_check = commands.add_parser(
+        "agent-check", help="validate the agent identity configuration before applying it"
+    )
+    agent_check.add_argument("--config", type=Path, default=Path("/etc/lurewall/agents.toml"))
     commands.add_parser("agent-replay-init", help="explicitly initialize new replay history")
     verify = commands.add_parser(
         "verify",
@@ -782,6 +786,23 @@ def _operator_command(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.command == "agent-check":
+        from lurewall import agentfeeds
+
+        try:
+            settings = agentfeeds.settings(args.config)
+        except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
+            print(f"agent-check: {args.config}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        for warning in settings.warnings:
+            print(f"agent-check: warning: {warning}", file=sys.stderr)
+        authoritative = sorted(f.name for f in settings.feeds.values() if f.authoritative)
+        print(
+            f"{args.config}: {len(settings.feeds)} feeds, {len(settings.claims)} claims, "
+            f"authoritative: {', '.join(authoritative) or 'none'}, "
+            f"visible authorities: {', '.join(settings.ingress) or 'none (all indeterminate)'}"
+        )
+        return EXIT_OK
     if args.command in ("agent-fetch", "agent-replay-init"):
         from lurewall import agentfeeds, agentfetch, webbotauth
 

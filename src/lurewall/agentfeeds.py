@@ -19,6 +19,11 @@ REQUESTS = Path("/var/lib/lurewall-refresh")
 REPLAY = Path("/var/lib/lurewall/agent-replay.sqlite")
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 DEFAULT_LIMIT = 256 * 1024
+# v0.4.0 trusts only Google's published crawler ranges to be complete. Every
+# other feed is partial: a miss against it is never evidence of a spoof.
+AUTHORITATIVE_URL = re.compile(
+    r"https://developers\.google\.com/static/crawling/ipranges/[a-z0-9][a-z0-9-]{0,63}\.json"
+)
 
 
 @dataclass(frozen=True)
@@ -39,13 +44,49 @@ class Settings:
     claims: dict
     ingress: tuple
     alert_hours: int
+    server_names: frozenset = frozenset()
+    warnings: tuple = ()
+
+
+def may_be_authoritative(url):
+    """Only Google's crawler range files can establish a conclusive miss in v0.4.0."""
+    return AUTHORITATIVE_URL.fullmatch(url) is not None
+
+
+def _authority(text):
+    """A client-facing authority as nginx logs it: host or host:port, lowercased."""
+    if not isinstance(text, str) or not text or not all(33 <= ord(c) < 127 for c in text):
+        raise ValueError("invalid visible authority")
+    parsed = urlsplit("//" + text)
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError("invalid visible authority") from None
+    if (
+        not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or (port is not None and not 0 < port < 65536)
+    ):
+        raise ValueError("invalid visible authority")
+    return text.lower()
 
 
 def settings(path=CONFIG):
     with path.open("rb") as stream:
         spec = tomllib.load(stream)
-    if set(spec) - {"feed", "claim", "visible_authorities", "alert_after_hours"}:
+    if set(spec) - {
+        "feed",
+        "claim",
+        "visible_authorities",
+        "visible_server_names",
+        "alert_after_hours",
+    }:
         raise ValueError("unknown agents configuration option")
+    warnings = []
     feeds = {}
     for name, row in spec.get("feed", {}).items():
         if not isinstance(row, dict) or set(row) - {
@@ -90,11 +131,18 @@ def settings(path=CONFIG):
             )
         ):
             raise ValueError("invalid feed limits or pin")
+        authoritative = trust == "authoritative"
+        if authoritative and (signer or not may_be_authoritative(row["url"])):
+            warnings.append(
+                f"feed {name}: only Google's published crawler ranges can be authoritative "
+                "in this release; treating it as partial"
+            )
+            authoritative = False
         feeds[name] = Feed(
             name,
             row["url"],
             signer,
-            trust == "authoritative",
+            authoritative,
             row.get("thumbprint", False),
             limit,
             pin,
@@ -115,15 +163,24 @@ def settings(path=CONFIG):
             ):
                 raise ValueError("invalid claim feed")
     ingress = spec.get("visible_authorities", [])
+    names = spec.get("visible_server_names", [])
     hours = spec.get("alert_after_hours", 6)
     if (
         not isinstance(ingress, list)
-        or not all(isinstance(x, str) for x in ingress)
+        or not isinstance(names, list)
         or type(hours) is not int
         or hours < 1
     ):
         raise ValueError("invalid ingress or alert interval")
-    return Settings(feeds, claims, tuple(ingress), hours)
+    ingress = tuple(dict.fromkeys(_authority(item) for item in ingress))
+    if not all(isinstance(x, str) and re.fullmatch(r"[A-Za-z0-9_.*~-]{1,253}", x) for x in names):
+        raise ValueError("invalid visible server name")
+    # nginx logs only the first server_name of the matched server block. Unless the
+    # operator lists those names, the hosts of the confirmed authorities stand in.
+    server_names = frozenset(x.lower() for x in names) or frozenset(
+        urlsplit("//" + item).hostname for item in ingress
+    )
+    return Settings(feeds, claims, ingress, hours, server_names, tuple(warnings))
 
 
 def strict_json(data):

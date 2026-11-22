@@ -5,6 +5,7 @@ import base64
 import contextlib
 import hashlib
 import json
+import os
 import re
 import sqlite3
 from urllib.parse import parse_qsl, quote, urlsplit
@@ -45,6 +46,55 @@ def replay_db(path):
         db.close()
         raise
     return db
+
+
+class ReplayStore:
+    """One replay connection for the life of the reader, integrity-checked when opened.
+
+    A missing, replaced or damaged store is retried at most once a minute, so a
+    stream of signed requests cannot turn into one integrity check per request.
+    """
+
+    RETRY_S = 60
+
+    def __init__(self, path):
+        self.path = path
+        self._db = None
+        self._ident = None
+        self._failed = None  # (identity, retry_at)
+
+    def connection(self, now):
+        try:
+            info = os.stat(self.path)
+        except OSError:
+            self.close()
+            raise
+        ident = (info.st_dev, info.st_ino)
+        if self._db is not None and ident == self._ident:
+            return self._db
+        self.close()
+        if self._failed is not None and self._failed[0] == ident and now < self._failed[1]:
+            raise sqlite3.OperationalError("replay store unavailable")
+        try:
+            self._db = replay_db(self.path)
+        except (OSError, ValueError, sqlite3.Error):
+            self._failed = (ident, now + self.RETRY_S)
+            raise
+        self._ident, self._failed = ident, None
+        return self._db
+
+    def discard(self, now):
+        """Drop a connection that failed mid-use; the next open re-checks the file."""
+        ident = self._ident
+        self.close()
+        if ident is not None:
+            self._failed = (ident, now + self.RETRY_S)
+
+    def close(self):
+        if self._db is not None:
+            with contextlib.suppress(sqlite3.Error):
+                self._db.close()
+        self._db = self._ident = None
 
 
 def remember(db, key, token, record, expiry, now):
@@ -256,45 +306,60 @@ def verify_one(record, feed, keys, label, entry, sig, legacy, db, now):
 
 
 def check(record, feed, keys, replay, now, *, evidence=None):
+    """Verify the captured signatures for one signer. ``replay`` is a ReplayStore or a path."""
+    store = replay if isinstance(replay, ReplayStore) else ReplayStore(replay)
+    try:
+        return _check(record, feed, keys, store, now, evidence)
+    finally:
+        if store is not replay:
+            store.close()
+
+
+def _check(record, feed, keys, store, now, evidence):
     cap = record.capture
     try:
-        with contextlib.closing(replay_db(replay)) as db:
-            directory = agents(cap["signature_agent"])
-            inputs = dictionary(cap["signature_input"], "input")
-            signatures = dictionary(cap["signature"], "signature")
-            if not inputs or not signatures or not directory:
-                return "incomplete"
-            legacy = None in directory
-            results = []
-            for label, entry in inputs.items():
-                if directory.get(None if legacy else label) != feed.signer:
-                    continue
-                if label not in signatures:
-                    results.append("incomplete")
-                    continue
-                outcome = verify_one(
-                    record, feed, keys, label, entry, signatures[label], legacy, db, now
-                )
-                if outcome == "valid":
-                    if evidence is not None:
-                        covered, params, _ = entry
-                        evidence.update(
-                            signer=feed.signer,
-                            key_thumbprint=thumb(keys[params["keyid"]]),
-                            covered=list(dict.fromkeys(c[0] for c in covered)),
-                        )
-                    return outcome
-                results.append(outcome)
-            if feed.signer in directory.values() and not results:
-                return "incomplete"
-            if "unknown_kid" in results:
-                return "unknown_kid"
-            if results and all(r in ("bad_signature", "expired") for r in results):
-                return results[0]
-            return next(
-                (r for r in results if r not in ("bad_signature", "expired")), "foreign_signer"
+        db = store.connection(now)
+    except (OSError, ValueError, sqlite3.Error):
+        return "replay_store_unavailable"
+    try:
+        directory = agents(cap["signature_agent"])
+        inputs = dictionary(cap["signature_input"], "input")
+        signatures = dictionary(cap["signature"], "signature")
+        if not inputs or not signatures or not directory:
+            return "incomplete"
+        legacy = None in directory
+        results = []
+        for label, entry in inputs.items():
+            if directory.get(None if legacy else label) != feed.signer:
+                continue
+            if label not in signatures:
+                results.append("incomplete")
+                continue
+            outcome = verify_one(
+                record, feed, keys, label, entry, signatures[label], legacy, db, now
             )
-    except (OSError, sqlite3.Error):
+            if outcome == "valid":
+                if evidence is not None:
+                    covered, params, _ = entry
+                    evidence.update(
+                        signer=feed.signer,
+                        key_thumbprint=thumb(keys[params["keyid"]]),
+                        covered=list(dict.fromkeys(c[0] for c in covered)),
+                    )
+                return outcome
+            results.append(outcome)
+        if feed.signer in directory.values() and not results:
+            return "incomplete"
+        if "unknown_kid" in results:
+            return "unknown_kid"
+        # Only a signature that fails cryptographic verification under the signer's
+        # own published key is conclusive. A genuine signature outside its window
+        # ("expired") proves the publisher signed it, so it is never a spoof.
+        if results and all(r == "bad_signature" for r in results):
+            return "bad_signature"
+        return next((r for r in results if r != "bad_signature"), "foreign_signer")
+    except sqlite3.Error:
+        store.discard(now)
         return "replay_store_unavailable"
     except (ValueError, KeyError, TypeError, OverflowError):
         return "indeterminate"

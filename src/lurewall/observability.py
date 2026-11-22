@@ -35,6 +35,9 @@ _HEALTH_MESSAGES = {
     "access_log_unavailable": "Lurewall cannot read the configured nginx access log",
     "access_log_parse_failure": "Lurewall could not parse nginx log records. Run lurewall doctor",
     "signed_log_stopped": "Lurewall signed-log writes are paused",
+    "agent_config_invalid": (
+        "Lurewall could not apply /etc/lurewall/agents.toml. Run lurewall agent-check"
+    ),
 }
 _LOGGER = logging.getLogger(__name__)
 
@@ -139,6 +142,8 @@ class Telemetry:
             self._metrics["would_block_total"] += 1
         elif kind == "enforcement_failed":
             self._metrics["enforcement_failures_total"] += 1
+            self._warn_health(kind)
+        elif kind == "agent_config_invalid":
             self._warn_health(kind)
         elif kind == "access_log_unavailable":
             self._metrics["access_log_unavailable_total"] += 1

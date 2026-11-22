@@ -118,14 +118,19 @@ def run():
     now = int(time.time())
     with tempfile.TemporaryDirectory() as temp:
         observer, key, kid = fixture(Path(temp), now)
-        fields = log_fields(now)
-        cases = [
-            ("Spoofed GPTBot", observe(observer, fields, now), "indeterminate", "partial_miss")
-        ]
-        sign_fields(fields, now, key, kid)
-        cases.append(("Offline signer", observe(observer, fields, now), "verified", "signature"))
-        fields["request_id"] = secrets.token_hex(16)
-        cases.append(("Replay", observe(observer, fields, now), "indeterminate", "replay"))
+        try:
+            fields = log_fields(now)
+            cases = [
+                ("Spoofed GPTBot", observe(observer, fields, now), "indeterminate", "partial_miss")
+            ]
+            sign_fields(fields, now, key, kid)
+            cases.append(
+                ("Offline signer", observe(observer, fields, now), "verified", "signature")
+            )
+            fields["request_id"] = secrets.token_hex(16)
+            cases.append(("Replay", observe(observer, fields, now), "indeterminate", "replay"))
+        finally:
+            observer.close()
     for name, result, _, _ in cases:
         print(f"{name}: {result['verdict']} ({result['reason']})")
     return int(

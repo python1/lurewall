@@ -1,5 +1,8 @@
+# The only Lurewall unit that talks to the network: it parses publisher
+# responses, so it gets at least the main observer's hardening.
 [Unit]
 Description=Refresh public agent identity evidence
+Wants=network-online.target
 After=network-online.target time-sync.target
 ConditionPathExists=/etc/lurewall/agents.toml
 OnFailure=lurewall-notify-failure.service
@@ -9,20 +12,37 @@ Type=oneshot
 User=lurewall-fetch
 Group=lurewall-fetch
 ExecStart=/opt/lurewall/current/bin/lurewall agent-fetch
+TimeoutStartSec=5min
 CacheDirectory=lurewall-fetch
 CacheDirectoryMode=0755
 Environment=SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 InaccessiblePaths=-/var/lib/lurewall -/var/log/lurewall -/srv/lurewall
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
-NoNewPrivileges=yes
-CapabilityBoundingSet=
-RestrictSUIDSGID=yes
+PrivateIPC=yes
+RemoveIPC=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
+ProtectKernelLogs=yes
 ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
 LockPersonality=yes
+MemoryDenyWriteExecute=yes
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
 UMask=0077

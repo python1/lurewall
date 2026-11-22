@@ -276,7 +276,12 @@ def test_impersonation_is_signed_and_never_added_to_source_attack_state(local, t
     obs, _, _ = identitylab.fixture(tmp_path, now)
     config = obs.config
     config.write_text(
-        config.read_text().replace('coverage = "partial"', 'coverage = "authoritative"')
+        config.read_text()
+        .replace('coverage = "partial"', 'coverage = "authoritative"')
+        .replace(
+            "https://ranges.example/ranges.json",
+            "https://developers.google.com/static/crawling/ipranges/common-crawlers.json",
+        )
     )
     fields = identitylab.log_fields(now)
     paths.access_log.write_text(json.dumps(fields) + "\n")
