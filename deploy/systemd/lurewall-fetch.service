@@ -26,4 +26,3 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 LockPersonality=yes
 UMask=0077
-

@@ -129,10 +129,6 @@ class Observer:
             or cap["authority"].lower() not in self.settings.ingress
             or cap["ingress"].lower() != cap["authority"].lower().split(":")[0]
             or record.status in (400, 414, 431)
-            or any(
-                v == "!overflow" or len(v.encode("utf-8", errors="replace")) > 8192
-                for v in cap.values()
-            )
         ):
             return verdict("indeterminate", "ingress_unconfirmed")
         ranges = feeds.get(policy.get("ranges"))
@@ -151,10 +147,15 @@ class Observer:
                 else:
                     ip_state = "authoritative_miss" if ranges.authoritative else "partial_miss"
         sig = "absent"
-        if signed and keyfeed:
+        if any(
+            cap[k] == "!overflow" or len(cap[k].encode("utf-8", errors="replace")) > 8192
+            for k in ("signature", "signature_input", "signature_agent")
+        ):
+            sig = "capture_overflow"
+        elif signed and keyfeed:
             keys, ref = self.snapshot(keyfeed, now)
-            if keys is None or cap["scheme"] != "https":
-                sig = "key_unavailable" if keys is None else "insecure_transport"
+            if keys is None:
+                sig = "key_unavailable"
             else:
                 row["key_snapshot"] = ref
                 sig = webbotauth.check(record, keyfeed, keys, self.replay, now, evidence=row)

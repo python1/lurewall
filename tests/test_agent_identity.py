@@ -250,3 +250,12 @@ def test_no_unpublished_identifier_fallback_or_signal_count_setting(tmp_path, la
     obs.config.write_text(obs.config.read_text() + "\ncount_toward_block = true\n")
     with pytest.raises(ValueError, match="claim policy"):
         agentfeeds.settings(obs.config)
+
+
+def test_signature_overflow_preserves_independent_range_credit(lab):
+    obs, _, _ = lab
+    fields = {**log_fields(NOW), "ua": "LabBot", "signature": "!overflow"}
+    assert observe(obs, fields, NOW)["verdict"] == "indeterminate"
+    fields["ip"] = "198.51.100.10"
+    row = observe(obs, fields, NOW)
+    assert row["reason"] == "ip_range" and row["signature_result"] == "capture_overflow"

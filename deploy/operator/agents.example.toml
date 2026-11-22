@@ -120,4 +120,3 @@ thumbprint = true
 url = "https://agent.bot.goog/.well-known/http-message-signatures-directory"
 signer = "https://agent.bot.goog"
 thumbprint = false
-
