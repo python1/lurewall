@@ -791,7 +791,7 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             settings = agentfeeds.settings(args.config)
-        except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
             print(f"agent-check: {args.config}: {type(exc).__name__}: {exc}", file=sys.stderr)
             return EXIT_USAGE
         for warning in settings.warnings:

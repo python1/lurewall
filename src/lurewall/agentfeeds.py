@@ -76,8 +76,16 @@ def _authority(text):
 
 
 def settings(path=CONFIG):
+    """Load and validate agents.toml. Any malformed shape is a ValueError."""
     with path.open("rb") as stream:
         spec = tomllib.load(stream)
+    try:
+        return _settings(spec)
+    except (AttributeError, TypeError, KeyError) as exc:
+        raise ValueError(f"invalid agents configuration shape ({type(exc).__name__})") from None
+
+
+def _settings(spec):
     if set(spec) - {
         "feed",
         "claim",

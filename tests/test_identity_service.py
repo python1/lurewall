@@ -11,7 +11,7 @@ import pytest
 
 import sig
 from conftest import FakeClock
-from lurewall import canaries, identitylab, service, signing
+from lurewall import canaries, cli, identitylab, service, signing
 from lurewall.verify import verify_log
 
 GOOGLE = "https://developers.google.com/static/crawling/ipranges/common-crawlers.json"
@@ -208,6 +208,30 @@ def test_a_broken_agents_file_never_stops_the_detector_and_edits_apply_live(tmp_
     metrics = (tmp_path / "telemetry/lurewall.prom").read_text()
     assert "lurewall_agent_impersonation_total 2" in metrics
     assert (tmp_path / "telemetry/service_failure.pending").exists()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "this is [not toml",
+        "claim = 5",
+        'feed = "x"',
+        "[claim]\nGPTBot = 3",
+        "[claim.X]\nranges = [1]",
+    ],
+)
+def test_no_malformed_agents_file_stops_the_service(tmp_path, bad):
+    now_s = 1_800_000_000
+    config = tmp_path / "agents.toml"
+    config.write_text(bad + "\n")
+    paths, signer = make_paths(tmp_path, config)
+    write(paths, [line(now_s, 1, ua="Googlebot/2.1")])
+    running = run(paths, FakeClock(now_s * 1000 + 50))
+    assert not running.identity.active
+    items = events(paths, signer)
+    (invalid,) = [i.detail for i in items if i.type == "agent_config_invalid"]
+    assert invalid["identity"] == "off"
+    assert cli.main(["agent-check", "--config", str(config)]) == cli.EXIT_USAGE
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")

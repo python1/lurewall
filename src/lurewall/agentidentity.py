@@ -270,7 +270,7 @@ class Runtime:
             if stamp[0] == "error":
                 raise OSError(stamp[1])
             settings = agentfeeds.settings(self.path)
-        except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
+        except Exception as exc:  # any failure leaves the detector running
             self.report(
                 "agent_config_invalid",
                 {
