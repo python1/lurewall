@@ -40,6 +40,17 @@ OPERATOR_FIELDS = (*FIELDS, "forwarded_for")
 _OPERATOR_FIELD_SET = frozenset(OPERATOR_FIELDS)
 ISSUANCE_FIELDS = ("lw_placement", "lw_path", "lw_until", "lw_source")
 _NATURAL_OPERATOR_FIELDS = _OPERATOR_FIELD_SET.union(ISSUANCE_FIELDS)
+CAPTURE_FIELDS = (
+    "scheme",
+    "authority",
+    "ingress",
+    "protocol",
+    "duration",
+    "signature",
+    "signature_input",
+    "signature_agent",
+)
+_CAPTURE_SET = frozenset(("v", *CAPTURE_FIELDS))
 _MAX_FORWARDED_LENGTH = 4096
 _MAX_FORWARDED_HOPS = 32
 
@@ -76,6 +87,9 @@ class Record:
     lw_path: str | None = None
     lw_until: str | None = None
     lw_source: str | None = None
+    capture: dict | None = None
+    duration_ms: int | None = None
+    client_visible: bool = False
 
 
 @dataclass(frozen=True)
@@ -171,6 +185,19 @@ def parse_line(
     if type(obj) is not dict:
         return failure("not_an_object")
     fields = obj.keys()
+    capture = None
+    duration = None
+    if "v" in fields:
+        if obj["v"] != "4" or not fields >= _CAPTURE_SET:
+            return failure("unsupported_capture")
+        fields = fields - _CAPTURE_SET
+        if fields not in (_OPERATOR_FIELD_SET, _NATURAL_OPERATOR_FIELDS):
+            return failure("peer_log_required")
+        capture = {key: obj[key] for key in CAPTURE_FIELDS if key != "duration"}
+        raw_time = obj["duration"]
+        if isinstance(raw_time, str) and _TS_RE.fullmatch(raw_time):
+            seconds, ms = raw_time.split(".")
+            duration = int(seconds) * 1000 + int(ms)
     operator_format = fields in (_OPERATOR_FIELD_SET, _NATURAL_OPERATOR_FIELDS)
     if not operator_format and fields != _FIELD_SET:
         return failure("unexpected_fields")
@@ -186,6 +213,7 @@ def parse_line(
     ip = _normalize_ip(obj["ip"])
     if ip is None:
         return failure("bad_ip")
+    peer = ip
     if operator_format and trusted_proxies:
         ip = _forwarded_client(ip, obj["forwarded_for"], trusted_proxies)
     if _STATUS_RE.fullmatch(obj["status"]) is None:
@@ -195,6 +223,10 @@ def parse_line(
 
     return Record(
         ts_ms=ts_ms,
+        capture=capture,
+        duration_ms=duration,
+        client_visible=capture is not None
+        and (ip != peer or not any(ipaddress.ip_address(peer) in n for n in trusted_proxies)),
         ip=ip,
         method=obj["method"],
         request=obj["request"],

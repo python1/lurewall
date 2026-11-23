@@ -24,7 +24,7 @@ refuse_existing /opt/lurewall/current
 refuse_existing /usr/local/sbin/lurewall
 refuse_existing /usr/local/bin/lurewall
 for unit in lurewall.service lurewall-sweeper.service lurewall-sweeper.timer \
-    lurewall-notify.service lurewall-notify.timer lurewall-notify-failure.service; do
+    lurewall-notify.service lurewall-notify.timer lurewall-notify-failure.service lurewall-fetch.service lurewall-fetch.timer; do
     refuse_existing "/etc/systemd/system/$unit"
     refuse_existing "/run/systemd/system/$unit"
     if [ "$1" = install ]; then

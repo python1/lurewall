@@ -102,6 +102,7 @@ class Summary:
     research: int = 0
     probes: Counter[str] = field(default_factory=Counter)
     switches: dict[tuple[str, str], PossibleSwitch] = field(default_factory=dict)
+    identities: Counter[tuple[str, str, str]] = field(default_factory=Counter)
     incomplete: bool = False
 
     def visit(self, item: Entry) -> None:
@@ -126,7 +127,15 @@ class Summary:
         if detail.get("oversize") is True:
             self.incomplete = True
             return
-        if kind == "canary_hit":
+        if kind == "agent_identity":
+            parts = (
+                key.split("|")
+                if item.type == "rollup" and isinstance(key, str)
+                else [detail.get(k) for k in ("verdict", "claim", "reason")]
+            )
+            if len(parts) == 3 and all(isinstance(part, str) for part in parts):
+                self.identities[tuple(parts)] += count
+        elif kind == "canary_hit":
             source = _source(item.source)
             if (
                 key == "research"
@@ -192,6 +201,22 @@ class Summary:
         return [
             ("Evidence window", coverage),
             ("Activity", activity),
+            *(
+                (
+                    heading,
+                    [
+                        f"{claim} ({reason}) — {count}"
+                        for (status, claim, reason), count in self.identities.most_common()
+                        if status == wanted
+                    ]
+                    or ["None recorded."],
+                )
+                for wanted, heading in (
+                    ("verified", "Verified agents"),
+                    ("impersonation", "Impersonation attempts"),
+                    ("indeterminate", "Indeterminate claims"),
+                )
+            ),
             ("Possible IP switches", links),
             ("Top probed paths (matched rules)", probes or ["No path-rule matches recorded."]),
         ]

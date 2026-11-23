@@ -133,7 +133,7 @@ def deployment(tmp_path):
         REPO,
         root=tmp_path,
         run=commands,
-        get_account=lambda: (os.getuid(), os.getgid()),
+        get_account=lambda *_args: (os.getuid(), os.getgid()),
         get_build_account=lambda: (os.getuid(), os.getgid()),
     )
     return target, commands

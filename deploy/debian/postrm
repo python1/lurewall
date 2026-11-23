@@ -14,5 +14,5 @@ case "${1-}" in
 esac
 
 if [ "${1-}" = purge ] && command -v deb-systemd-helper >/dev/null 2>&1; then
-    deb-systemd-helper purge lurewall.service lurewall-sweeper.timer lurewall-notify.timer
+    deb-systemd-helper purge lurewall.service lurewall-sweeper.timer lurewall-notify.timer lurewall-fetch.timer
 fi

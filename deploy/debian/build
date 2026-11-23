@@ -32,9 +32,13 @@ UNITS = {
     "lurewall-sweeper.timer": "systemd",
     "lurewall-notify.service": "systemd",
     "lurewall-notify-failure.service": "systemd",
+    "lurewall-fetch.service": "systemd",
+    "lurewall-fetch.timer": "systemd",
     "lurewall-notify.timer": "systemd",
 }
 CONFIG_FILES = {
+    "etc/lurewall/agents.example.toml": "operator/agents.example.toml",
+    "etc/lurewall/nginx/operator-format-v4.conf": "nginx/operator-format-v4.conf",
     "etc/lurewall/engine.toml": "operator/engine.toml",
     "etc/lurewall/signals.toml": "operator/signals.toml",
     "etc/lurewall/nginx/operator-format.conf": "nginx/operator-format.conf",
@@ -170,7 +174,7 @@ def stage(
         "Architecture: all\n"
         "Maintainer: Paul Charydczak <python1@users.noreply.github.com>\n"
         "Depends: python3 (>= 3.11), python3-cryptography (>= 40), nginx, nftables, logrotate,\n"
-        " adduser, util-linux, init-system-helpers, systemd\n"
+        " ca-certificates, adduser, util-linux, init-system-helpers, systemd\n"
         # Debian enables an installed nginx module for every vhost. Natural placements
         # are opt-in, so the njs module is installed only when an operator chooses them.
         f"Suggests: {NJS_PACKAGE} (>= {NJS_MINIMUM})\n"

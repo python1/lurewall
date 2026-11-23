@@ -87,9 +87,13 @@ def test_report_empty_window_and_invalid_duration(make_log, signer, capsys):
 
 def test_grafana_dashboard_queries_shipped_textfile_metrics(tmp_path):
     dashboard = json.loads((ROOT / "deploy/grafana/lurewall.json").read_text())
-    Telemetry(tmp_path).publish(force=True)
+    telemetry = Telemetry(tmp_path)
+    telemetry._event(
+        "agent_identity", {"verdict": "verified", "claim": "LabBot", "reason": "ip_range"}
+    )
+    telemetry.publish(force=True)
     metrics = {
-        line.split()[0]
+        line.split()[0].split("{")[0]
         for line in (tmp_path / METRICS_FILE).read_text().splitlines()
         if line and not line.startswith("#")
     }

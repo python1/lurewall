@@ -14,12 +14,14 @@ import os
 import ssl
 import stat
 import time
+from collections import Counter
 from collections.abc import Callable
 from http.client import HTTPException, HTTPSConnection
 from pathlib import Path
 from typing import Literal
 from urllib.parse import SplitResult, urlsplit
 
+from lurewall.agentfeeds import NAME
 from lurewall.logreader import Sink
 
 WEBHOOK_ENV = "LUREWALL_WEBHOOK_URL"
@@ -27,16 +29,19 @@ METRICS_FILE = "lurewall.prom"
 _PUBLISH_INTERVAL_S = 15
 _HEALTH_WARNING_INTERVAL_S = 60
 _WEBHOOK_TIMEOUT_S = 5
-_ALERTS = ("integrity_stop", "service_failure", "block_applied")
+_ALERTS = ("integrity_stop", "service_failure", "block_applied", "impersonation")
 _HEALTH_MESSAGES = {
     "enforcement_failed": "Lurewall could not apply or reconcile firewall state",
     "access_log_unavailable": "Lurewall cannot read the configured nginx access log",
     "access_log_parse_failure": "Lurewall could not parse nginx log records. Run lurewall doctor",
     "signed_log_stopped": "Lurewall signed-log writes are paused",
+    "agent_config_invalid": (
+        "Lurewall could not apply /etc/lurewall/agents.toml. Run lurewall agent-check"
+    ),
 }
 _LOGGER = logging.getLogger(__name__)
 
-Alert = Literal["integrity_stop", "service_failure", "block_applied"]
+Alert = Literal["integrity_stop", "service_failure", "block_applied", "impersonation"]
 Sender = Callable[[SplitResult, Alert], bool]
 
 
@@ -92,7 +97,11 @@ class Telemetry:
         self._directory = directory
         self._clock = clock
         self._published_at: float | None = None
+        self._agent_counts = Counter()
         self._metrics = {
+            "agent_verified_total": 0,
+            "agent_impersonation_total": 0,
+            "agent_indeterminate_total": 0,
             "records_processed_total": 0,
             "blocks_applied_total": 0,
             "would_block_total": 0,
@@ -112,13 +121,29 @@ class Telemetry:
         return _ObservedSink(target, self)
 
     def _event(self, kind: str, detail: dict | None) -> None:
-        if kind == "block_applied" or (kind == "block" and (detail or {}).get("applied") is True):
+        if kind == "agent_identity":
+            status = (detail or {}).get("verdict")
+            if status in ("verified", "impersonation", "indeterminate"):
+                self._metrics[f"agent_{status}_total"] += 1
+                claim = detail.get("claim", "")
+                method = detail.get("reason") if status == "verified" else "none"
+                if (
+                    isinstance(claim, str)
+                    and NAME.fullmatch(claim)
+                    and method in ("signature", "ip_range", "both", "none")
+                ):
+                    self._agent_counts[status, claim, method] += 1
+            if status == "impersonation" and (detail or {}).get("alert") is True:
+                self._queue("impersonation")
+        elif kind == "block_applied" or (kind == "block" and (detail or {}).get("applied") is True):
             self._metrics["blocks_applied_total"] += 1
             self._queue("block_applied")
         elif kind == "would_block":
             self._metrics["would_block_total"] += 1
         elif kind == "enforcement_failed":
             self._metrics["enforcement_failures_total"] += 1
+            self._warn_health(kind)
+        elif kind == "agent_config_invalid":
             self._warn_health(kind)
         elif kind == "access_log_unavailable":
             self._metrics["access_log_unavailable_total"] += 1
@@ -189,6 +214,13 @@ class Telemetry:
             f"lurewall_{name} {value}\n"
             for name, value in snapshot.items()
         )
+        if self._agent_counts:
+            content += "# TYPE lurewall_agent_claims_total counter\n"
+            for (status, claim, method), count in sorted(self._agent_counts.items()):
+                content += (
+                    f'lurewall_agent_claims_total{{verdict="{status}",claim="{claim}",'
+                    f'method="{method}"}} {count}\n'
+                )
         try:
             _publish_file(self._directory, content)
         except OSError:

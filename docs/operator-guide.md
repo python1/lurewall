@@ -349,3 +349,128 @@ live-host qualification, and deployment-specific consent, monitoring,
 retention and capacity policies. A
 CDN enforcement adapter merits a separate design for limited credentials,
 provider-scoped TTLs, failure handling and independent verification.
+
+## Agent verification
+
+Install the v0.4 reader **before** switching nginx. Omit
+`/etc/lurewall/agents.toml` to leave verification off. Start with dry-run.
+The main service reads local files and retains its network restrictions.
+The on-demand `lurewall-fetch.service` runs as its own system user and uses
+system DNS, the system CA bundle and `/var/cache/lurewall-fetch`. Its
+timer is opt-in. The helper has no firewall capability or inbound listener.
+
+1. Save the currently active `/etc/lurewall/nginx/operator-format.conf`
+   as `/etc/lurewall/nginx/operator-format.conf.pre-v4` before the switch.
+   It is a dpkg conffile. The package ships the extended template separately
+   as `/etc/lurewall/nginx/operator-format-v4.conf`. Review local differences
+   and install its maps and format in the active file after upgrading.
+   Natural sites instead save
+   `/etc/lurewall/natural/nginx/lurewall-natural-format.conf` as
+   `/etc/lurewall/natural/nginx/lurewall-natural-format.conf.pre-v4`
+   and install the regenerated format include. Run `nginx -t` and reload.
+2. Copy `/etc/lurewall/agents.example.toml` to `/etc/lurewall/agents.toml`
+   (mode 0644). List only confirmed client-facing TLS authorities in
+   `visible_authorities` (include a non-default port). nginx logs only the
+   **first** `server_name` of the matched server block: when a block serves
+   aliases (`www.example.com` under `server_name example.com`) or is the
+   default block (`server_name _`), list those first names in
+   `visible_server_names`. Check that the original authority, method, target,
+   all signature headers and socket peer survive the actual ingress path.
+   Configure trusted proxy CIDRs narrowly. Leave rewritten CDN/backend
+   authorities out. Avoid mixing confirmed and lossy paths on the same logging
+   vhost. Run `sudo lurewall agent-check` after every edit.
+3. On first setup run `sudo lurewall agent-replay-init`, then
+   `sudo systemctl enable --now lurewall-fetch.timer` and
+   `sudo systemctl start lurewall-fetch.service`. The running reader applies
+   `agents.toml` within five seconds of an edit, with no restart. Run
+   `lurewall report --since 10m` and check both units' journals. A missing, corrupt, full or locked replay
+   store withholds signature credit. To recover, restore the original store.
+   If its history is lost, leave verification offline for at least 24 hours plus
+   60 seconds before explicitly creating a fresh store.
+4. For offline operation omit the timer, and place each trusted public range or
+   key document in `/etc/lurewall/pins/FEED.json` under root ownership. Configure
+   its lowercase `sha256` and integer Unix `pin_until` in the feed table.
+   Transfer key sets from a trusted control plane that fetched the configured
+   HTTPS directory. A local digest alone cannot establish publisher provenance.
+   Rotate the pins and their `sha256`/`pin_until` before expiry; the reader
+   picks up the edited file without a restart.
+
+`agents.toml` is optional and can never stop the detector. If it is missing,
+verification is off. If it cannot be read or parsed, at startup or after an
+edit, the reader records `agent_config_invalid` in the signed log, writes an
+error to its journal, raises the `service_failure` alert, and keeps the last
+valid settings in force (or stays off). Every applied change is recorded as
+`agent_config_loaded`, removal as `agent_config_removed`.
+
+nginx records version 4, the original request line and URI, original authority
+including port, scheme, protocol, vhost, request duration and three signature
+headers. Fields use JSON escaping. The reader stores duration in integer milliseconds.
+Each signature field above 8192 bytes becomes an explicit overflow marker. Keep
+`large_client_header_buffers` appropriate for the vhost (for example `4 16k`).
+nginx may reject a header larger than one buffer before the request reaches a
+location. Keep the access log private and rotate it since a captured signature
+may remain reusable until expiry. The signed event records the verdict and
+snapshot digests and omits raw signatures. The outer log-line bound is 256 KiB.
+
+The adapter verifies Ed25519 and RSA-PSS-SHA512 on captured RFC 9421 components,
+including the agent member bound to its signature label. It accepts deployed
+legacy quoted agent headers. It checks published key IDs, key validity at
+issuance and use, a maximum 24-hour signature lifetime and 60 seconds of skew.
+Replay checks use a persistent per-key nonce or a digest of the signed base.
+A minimal authority-only signature provides no assurance about the path or body.
+
+Exact HTTPS feed URLs, the byte limit (256 KiB default), a three-second
+deadline, public-only DNS resolution and certificate verification apply to
+both kinds of fetch. Redirects are rejected. No content-type assumption is
+made. If the first resolved address is unreachable, the helper tries the next
+vetted one inside the same three-second deadline. It revalidates according to
+publisher cache directives, but never sooner than 15 minutes (several
+publishers send `no-store` or `no-cache`) and never later than 45 minutes, so
+the one-hour evidence survives a failed retry. A reader's request for an
+unknown key bypasses those bounds, at most once a minute. It stores local verification
+snapshots with a one-hour lifetime from successful retrieval; publisher
+`creationTime` is informational. An unknown key queues a bounded file request
+for the next timer run. Each read produces its final verdict without waiting.
+Check `alert_after_hours` for persistent retrieval failure alerts.
+
+Only Google's crawler range files
+(`https://developers.google.com/static/crawling/ipranges/*.json`) can be
+authoritative in this release, and the code enforces it: any other feed marked
+`coverage = "authoritative"` is reported by `agent-check`, the fetch helper and
+the reader, and treated as partial. A miss against a partial feed is never
+evidence. An IP match uses the full client address before IPv6 grouping. A valid
+expected signature or an in-range address verifies a claim. An authoritative miss
+with no valid signature, or a signature that fails verification under the expected
+signer's own published key, can raise an impersonation alert. A genuine signature
+outside its validity window (`expired`) proves the publisher signed it and stays
+indeterminate. A User-Agent naming several mapped agents is judged per name: a
+conclusive failure of any one is reported as impersonation, and otherwise the
+request is verified only if every name verifies. Each impersonation event is
+signed individually with its request ID, line hash and snapshot digests; repeats of
+verified and indeterminate outcomes are rolled up per source, outcome and evidence
+snapshot. Missing evidence, unsupported families and rewritten
+ingress stay indeterminate. Signed browser requests can establish an identity
+even with an ordinary browser User-Agent. Set `alert = false` in a claim table to
+mute its notification while retaining its signed observation. No identity result
+has any enforcement weight.
+
+A range establishes publisher egress at the stated scope. Corporate NAT, CGNAT,
+VPNs and Tor can put unrelated visitors behind one address. SEO audit tools
+often send a Googlebot User-Agent from an office network. Allowlist your own
+office before enabling ordinary enforcement. Consult the evidence method and
+source before attributing an alert to an individual.
+
+### Roll back from v0.4 to v0.3
+
+Restore `/etc/lurewall/nginx/operator-format.conf.pre-v4` over
+`/etc/lurewall/nginx/operator-format.conf`. For natural sites restore
+`/etc/lurewall/natural/nginx/lurewall-natural-format.conf.pre-v4` over
+`/etc/lurewall/natural/nginx/lurewall-natural-format.conf`. Run `nginx -t`,
+reload and let old nginx workers finish their outstanding requests. Keep v0.4
+running until the reader has drained the last extended line across any rotation.
+Check the cursor inode/offset against the active access log after a quiet interval
+and verify the signed log and checkpoint. Stop the fetch timer and service, then
+stop the reader, install the previous release and resume with the **same**
+`reader.state`, engine state, signing key, events log and checkpoint. Preserve the
+restored local conffile if dpkg prompts. The engine schema stays at version 1.
+Verify the chain again and check that the cursor advances on a new legacy line.

@@ -112,3 +112,11 @@ Issue #14 tracks these:
 
 After that, run the lab again with more agents. The two-signal rule stays the
 default.
+
+## Agent verification in v0.4
+
+The historical lab results above predate identity verification. The optional reader
+now records whether a declared identity matches an official range or an authenticated
+request signature. A partial directory can establish a positive match. An address
+missing from it remains indeterminate. Impersonation alerts carry zero votes toward a
+block. The source-bound canary and independent attack-probe requirements still apply.

@@ -48,6 +48,9 @@ def test_metrics_are_bounded_aggregate_and_go_down_on_clean_stop(tmp_path):
     sink.append("parse_failure_rollup", None, {"count": 12})
     telemetry.publish(records=6, active_blocks=2, lag_bytes=17, enforcing=True, log_stopped=True)
     expected = {
+        "lurewall_agent_verified_total": "0",
+        "lurewall_agent_impersonation_total": "0",
+        "lurewall_agent_indeterminate_total": "0",
         "lurewall_up": "1",
         "lurewall_metrics_timestamp_seconds": str(clock.now),
         "lurewall_records_processed_total": "6",
@@ -102,7 +105,9 @@ def test_degraded_running_service_queues_health_alert_and_limits_journal(tmp_pat
         sink.append("access_log_unavailable", None)
         sink.append("parse_failure", None)
         telemetry.publish(log_stopped=True)
-    assert caplog.messages == list(observability._HEALTH_MESSAGES.values())
+    service_health = dict(observability._HEALTH_MESSAGES)
+    service_health.pop("agent_config_invalid")
+    assert caplog.messages == list(service_health.values())
     assert "private fixture" not in caplog.text
     assert (tmp_path / "service_failure.pending").read_bytes() == b""
     clock.advance(60)
