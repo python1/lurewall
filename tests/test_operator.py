@@ -302,3 +302,49 @@ def test_impersonation_is_signed_and_never_added_to_source_attack_state(local, t
     (identity,) = [item for item in items if item.type == "agent_identity"]
     assert identity.detail["verdict"] == "impersonation" and identity.detail["counted"] is False
     assert identity.detail["duration_ms"] == 10
+
+
+@pytest.mark.parametrize(
+    ("uid", "enforcing", "returncode", "output", "level", "detail"),
+    [
+        (
+            1000,
+            False,
+            1,
+            "netlink: Error: cache initialization failed: Operation not permitted",
+            "info",
+            "non-root",
+        ),
+        (0, True, 1, "Operation not permitted (you must be root)", "fail", "CAP_NET_ADMIN"),
+        (0, False, 0, '{"nftables":[]}', "info", "managed table is absent"),
+        (0, True, 0, '{"nftables":[]}', "warn", "managed table is absent"),
+        (
+            1000,
+            False,
+            0,
+            '{"nftables":[{"table":{"family":"inet","name":"lurewall"}}]}',
+            "pass",
+            "probe succeeded",
+        ),
+        (1000, True, 1, "other nft error", "fail", "nft exited with status 1"),
+        (1000, False, 0, "malformed", "warn", "unexpected form"),
+    ],
+)
+def test_doctor_nft_probe(monkeypatch, uid, enforcing, returncode, output, level, detail):
+    config = engineconfig.EngineConfig(dry_run=not enforcing, adapter="nftables")
+    monkeypatch.setattr(operator.os, "geteuid", lambda: uid)
+    result = subprocess.CompletedProcess(
+        [], returncode, stdout="" if returncode else output, stderr=output if returncode else ""
+    )
+    run = Mock(return_value=result)
+    monkeypatch.setattr(subprocess, "run", run)
+    check = operator._nft_check(config)
+    assert check.level == level and detail in check.detail
+    assert run.call_args.args == ([config.nft_path, "-j", "list", "tables"],)
+
+
+def test_doctor_reports_missing_nft_even_for_unprivileged_caller(monkeypatch):
+    monkeypatch.setattr(operator.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(subprocess, "run", Mock(side_effect=FileNotFoundError))
+    check = operator._nft_check(engineconfig.EngineConfig())
+    assert check.level == "warn" and "FileNotFoundError" in check.detail

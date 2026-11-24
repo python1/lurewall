@@ -138,6 +138,10 @@ verify_evidence
 import json, sys
 checks = {entry["name"]: entry for entry in json.load(sys.stdin)}
 assert checks["permissions"]["level"] == "pass", checks
+# The installed launcher drops root. Its nft query cannot inspect the table
+# whose absence assert_observer independently confirmed with CAP_NET_ADMIN.
+nft = checks["nftables"]
+assert nft["level"] == "info" and "non-root" in nft["detail"], nft
 if sys.argv[1] == "systemd":
     assert checks["nginx log"]["level"] == "pass", checks
 ' "$mode"

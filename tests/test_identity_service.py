@@ -301,3 +301,57 @@ def test_impersonation_keeps_per_request_evidence_and_ordinary_repeats_roll_up(t
     assert rollup.detail["count"] == 2
     assert rollup.detail["key"].startswith("verified|Googlebot|ip_range|")
     assert len(rollup.detail["key"].split("|")[3]) == 16  # the range snapshot digest prefix
+
+
+@pytest.mark.parametrize(
+    ("ua", "claim"),
+    [
+        ("Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "Googlebot"),
+        (
+            "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; "
+            "GPTBot/1.4; +https://openai.com/gptbot",
+            "GPTBot",
+        ),
+        (
+            "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; "
+            "ChatGPT-User/1.0; +https://openai.com/bot",
+            "ChatGPT-User",
+        ),
+        (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko; compatible; "
+            "Google-Agent; +https://developers.google.com/crawling/docs/crawlers-fetchers/"
+            "google-agent) Chrome/138.0.0.0 Safari/537.36",
+            "Google-Agent",
+        ),
+        ("Mozilla/5.0 (compatible; SEO crawler; like Googlebot)", None),
+        ("Mozilla/5.0 (LiKe  Googlebot/2.1; +http://www.google.com/bot.html)", None),
+        ("SEO/1.0 (LIKE\tGooglebot; like GPTBot)", None),
+        ("SEO/1.0 (like Googlebot) GPTBot/1.4", "GPTBot"),
+        ("Googlebot/2.1 (like Googlebot)", "Googlebot"),
+        ("SEO/1.0 (unlike Googlebot)", "Googlebot"),
+    ],
+)
+def test_service_distinguishes_agent_claims_from_comparisons(tmp_path, ua, claim):
+    clock = FakeClock()
+    now = clock.now // 1000
+    config, _, _ = google_lab(tmp_path, now)
+    with config.open("a") as stream:
+        stream.write(
+            '[claim.ChatGPT-User]\nranges = "ranges"\n[claim.Google-Agent]\nranges = "ranges"\n'
+        )
+    paths, signer = make_paths(tmp_path, config)
+    # On an authoritative miss, any claim would create an alert.
+    ip = SOURCE if claim is None else "198.51.100.7"
+    write(paths, [line(now, 0, ip=ip, ua=ua)])
+    running = run(paths, clock)
+    assert running.identity.active
+    rows = [item.detail for item in events(paths, signer) if item.type == "agent_identity"]
+    assert [(row["ua_claim"], row["verdict"]) for row in rows] == (
+        [] if claim is None else [(claim, "verified")]
+    )
+    assert all("ua_claims" not in row for row in rows)
+    assert (
+        "lurewall_records_processed_total 1\n"
+        in (paths.telemetry_dir / "lurewall.prom").read_text()
+    )
+    assert not (paths.telemetry_dir / "impersonation.pending").exists()

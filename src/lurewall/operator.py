@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from lurewall import engineconfig
-from lurewall.nft import NftAdapter, NftError, element_for, system_runner
+from lurewall.nft import NftAdapter, NftError, NftPermissionError, element_for, system_runner
 
 if TYPE_CHECKING:
     from lurewall import verify
@@ -378,6 +378,30 @@ def natural_checks(njs_problem=None) -> list[Check]:
     return [njs, Check("rollback", "warn", NATURAL_ROLLBACK)]
 
 
+def _nft_check(config: engineconfig.EngineConfig) -> Check:
+    fault_level = "fail" if config.enforcing else "warn"
+    try:
+        installed = NftAdapter(system_runner(config.nft_path), dry_run=False).installed()
+    except NftPermissionError:
+        if os.geteuid() != 0:
+            return Check(
+                "nftables",
+                "info",
+                "doctor runs as a non-root user. Listing nftables tables requires CAP_NET_ADMIN. "
+                "Check table visibility with sudo nft -j list tables",
+            )
+        return Check("nftables", fault_level, "nft denied access as root. Check CAP_NET_ADMIN")
+    except NftError as exc:
+        return Check("nftables", fault_level, f"read-only table probe failed: {exc}")
+    if installed:
+        return Check("nftables", "pass", "read-only managed table probe succeeded")
+    return Check(
+        "nftables",
+        "warn" if config.enforcing else "info",
+        "managed table is absent. It is created on enforcement startup",
+    )
+
+
 def doctor(
     *,
     engine_path: Path,
@@ -459,25 +483,7 @@ def doctor(
             )
         )
 
-    try:
-        if not NftAdapter(system_runner(config.nft_path), dry_run=False).installed():
-            checks.append(
-                Check(
-                    "nftables",
-                    "warn",
-                    "managed table is absent; it is created on enforcement startup",
-                )
-            )
-        else:
-            checks.append(Check("nftables", "pass", "read-only managed table probe succeeded"))
-    except NftError:
-        checks.append(
-            Check(
-                "nftables",
-                "fail" if config.enforcing else "warn",
-                "read-only probe failed; check installation and CAP_NET_ADMIN",
-            )
-        )
+    checks.append(_nft_check(config))
 
     if not event_log.exists():
         checks.append(

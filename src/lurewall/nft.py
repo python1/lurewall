@@ -60,6 +60,10 @@ class NftError(RuntimeError):
     """nft could not be run, failed, or printed something unexpected."""
 
 
+class NftPermissionError(NftError):
+    """The kernel denied the nft operation."""
+
+
 # Takes nft's arguments and optional standard input; returns standard output.
 Runner = Callable[[list[str], str | None], str]
 
@@ -82,6 +86,8 @@ def system_runner(nft_path: str = DEFAULT_NFT) -> Runner:
             raise NftError(f"nft could not be run: {type(exc).__name__}") from exc
         if done.returncode != 0:
             # nft's message is not passed on: it can quote what it was given.
+            if "Operation not permitted" in done.stderr or "Permission denied" in done.stderr:
+                raise NftPermissionError("nft reported a permission denial")
             raise NftError(f"nft exited with status {done.returncode}")
         return done.stdout
 

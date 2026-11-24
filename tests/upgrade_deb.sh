@@ -18,7 +18,7 @@ packages=("$2"/lurewall_*_all.deb)
 (( ${#packages[@]} == 1 )) || { echo "Expected exactly one new package." >&2; exit 1; }
 new=$(realpath -- "${packages[0]}")
 [[ $(dpkg-deb --field "$old" Version) == 0.3.0* ]]
-[[ $(dpkg-deb --field "$new" Version) == 0.4.0* ]]
+[[ $(dpkg-deb --field "$new" Version) == 0.4.1* ]]
 
 site=/etc/nginx/conf.d/lurewall-upgrade-ci.conf
 format=/etc/lurewall/nginx/operator-format.conf
@@ -95,7 +95,7 @@ prefix=$(wc -c < "$scratch/event-prefix")
 
 echo "== upgrade to this build"
 install_package "$new"
-[[ $(dpkg-query --show --showformat '${Version}' lurewall) == 0.4.0* ]]
+[[ $(dpkg-query --show --showformat '${Version}' lurewall) == 0.4.1* ]]
 systemctl is-active --quiet lurewall.service
 cmp -- "$format" "$scratch/format.v030"
 cmp -- "$engine" "$scratch/engine"

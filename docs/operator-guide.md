@@ -179,7 +179,8 @@ sudo lurewall pubkey --key /var/lib/lurewall/keys/lurewall.key
 `doctor` samples the actual access log and validates the installed configs,
 local paths, recent timestamps, nftables visibility and the checkpoint.
 The standalone doctor runs as the service account without the unit's
-firewall capability. If its nftables probe is unavailable, use
+firewall capability, even when invoked through the package launcher with sudo.
+A permission denial under this account is informational. Use
 `sudo /usr/sbin/nft -j list tables` for the independent read-only kernel
 check. When enabling enforcement, also verify startup under the systemd
 drop-in.
