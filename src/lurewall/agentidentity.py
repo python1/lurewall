@@ -12,6 +12,8 @@ import stat
 from lurewall import agentfeeds, webbotauth
 from lurewall.agentfeeds import CACHE, REPLAY, REQUESTS, atomic, parse_feed, strict_json
 
+_LIKE_PREFIX = re.compile(r"(?<![A-Za-z0-9_-])like[ \t]+", re.ASCII | re.IGNORECASE)
+
 
 class Observer:
     def __init__(
@@ -24,7 +26,7 @@ class Observer:
         self.loaded = {}
         self.requested = {}
         self.tokens = re.compile(
-            r"(?<![A-Za-z0-9_-])("
+            r"(?<![A-Za-z0-9_-])(?:"
             + "|".join(re.escape(token) for token in settings.claims)
             + r")(?![A-Za-z0-9_-])",
             re.ASCII,
@@ -77,10 +79,19 @@ class Observer:
         with contextlib.suppress(OSError):  # Timer refresh is independent.
             atomic(self.requests / feed.name, b"refresh\n")
 
+    def _claims(self, ua):
+        if not self.settings.claims:
+            return []
+        # Exclude only the occurrence immediately following a comparison.
+        compared = {prefix.end() for prefix in _LIKE_PREFIX.finditer(ua)}
+        return sorted(
+            {match.group() for match in self.tokens.finditer(ua) if match.start() not in compared}
+        )
+
     def observe(self, record, now_ms):
         now = now_ms // 1000
         cap = record.capture
-        claims = sorted(set(self.tokens.findall(record.ua))) if self.settings.claims else []
+        claims = self._claims(record.ua)
         signed = bool(
             cap and any(cap[k] for k in ("signature", "signature_input", "signature_agent"))
         )
